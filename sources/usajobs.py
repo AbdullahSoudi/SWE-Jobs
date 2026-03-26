@@ -1,5 +1,6 @@
-"""USAJobs — US government job board API (free, no key for basic search)."""
+"""USAJobs — US government job board API (free, needs API key + email)."""
 
+import os
 import logging
 from models import Job
 from sources.http_utils import get_json
@@ -16,9 +17,17 @@ SEARCHES = [
 
 def fetch_usajobs() -> list[Job]:
     """Fetch remote IT jobs from USAJobs."""
+    api_key = os.getenv("USAJOBS_API_KEY", "")
+    api_email = os.getenv("USAJOBS_EMAIL", "")
+
+    if not api_key or not api_email:
+        log.warning("USAJobs: USAJOBS_API_KEY or USAJOBS_EMAIL not set — skipping.")
+        return []
+
     headers = {
         "Host": "data.usajobs.gov",
-        "User-Agent": "ProgrammingJobsBot (contact@example.com)",
+        "User-Agent": api_email,
+        "Authorization-Key": api_key,
     }
 
     jobs = []
