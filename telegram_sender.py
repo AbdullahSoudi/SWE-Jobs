@@ -27,16 +27,12 @@ def _match_keywords(text: str, keywords: list[str]) -> bool:
 
 def _is_egypt_job(job: Job) -> bool:
     from config import EGYPT_PATTERNS
-    if not job.location:
-        return False
     loc = job.location.lower()
     return any(p in loc for p in EGYPT_PATTERNS)
 
 
 def _is_saudi_job(job: Job) -> bool:
     from config import SAUDI_PATTERNS
-    if not job.location:
-        return False
     loc = job.location.lower()
     return any(p in loc for p in SAUDI_PATTERNS)
 
@@ -186,7 +182,12 @@ def send_jobs(jobs: list[Job]) -> int:
     return total_sent
 
 
-def _escape_html(text: str) -> str:
+def _escape_html(text) -> str:
+    if text is None:
+        return ""
+    if isinstance(text, list):
+        text = ", ".join(str(t) for t in text)
+    text = str(text)
     return (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
