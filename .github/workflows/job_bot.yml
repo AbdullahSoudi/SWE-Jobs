@@ -55,6 +55,8 @@ jobs:
           TOPIC_MARKETING: ${{ secrets.TOPIC_MARKETING }}
           TOPIC_DATA_ENG: ${{ secrets.TOPIC_DATA_ENG }}
           TOPIC_APP_SUPPORT: ${{ secrets.TOPIC_APP_SUPPORT }}
+          TOPIC_DESIGN: ${{ secrets.TOPIC_DESIGN }}
+          TOPIC_BUSINESS: ${{ secrets.TOPIC_BUSINESS }}
           # API Keys
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
@@ -66,6 +68,7 @@ jobs:
         run: python main.py
 
       - name: Save seen_jobs.json to data branch
+        if: always()
         run: |
           # Copy to /tmp/ before switching branches
           cp seen_jobs.json /tmp/seen_jobs.json
