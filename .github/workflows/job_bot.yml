@@ -9,6 +9,7 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: bot
 
     steps:
       - name: Checkout
@@ -25,14 +26,14 @@ jobs:
       - name: Run bot
         env:
           # Supabase
-          DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-          DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-          DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-          DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-          DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           # Telegram
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
           ADMIN_TELEGRAM_ID: ${{ secrets.ADMIN_TELEGRAM_ID }}
           # Topic Thread IDs
           TOPIC_GENERAL: ${{ secrets.TOPIC_GENERAL }}

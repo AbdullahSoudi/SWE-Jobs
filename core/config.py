@@ -19,7 +19,7 @@ load_dotenv()
 # =============================================================================
 
 SUPABASE_DB_HOST: str = os.getenv("DB_HOST", "")
-SUPABASE_DB_PORT: int = int(os.getenv("DB_PORT", "6543"))
+SUPABASE_DB_PORT: int = int(os.getenv("DB_PORT", "") or "6543")
 SUPABASE_DB_NAME: str = os.getenv("DB_NAME", "postgres")
 SUPABASE_DB_USER: str = os.getenv("DB_USER", "postgres")
 SUPABASE_DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
