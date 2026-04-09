@@ -35,5 +35,5 @@ def fetch_remoteok() -> list[Job]:
             tags=item.get("tags", []) or [],
             is_remote=True,
         ))
-    log.info(f"RemoteOK: fetched {len(jobs)} jobs.")
+    log.debug(f"RemoteOK: fetched {len(jobs)} jobs.")
     return jobs

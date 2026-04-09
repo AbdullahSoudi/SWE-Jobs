@@ -60,5 +60,5 @@ def fetch_themuse() -> list[Job]:
                     tags=tag_names,
                     is_remote=is_remote,
                 ))
-    log.info(f"The Muse: fetched {len(jobs)} jobs.")
+    log.debug(f"The Muse: fetched {len(jobs)} jobs.")
     return jobs

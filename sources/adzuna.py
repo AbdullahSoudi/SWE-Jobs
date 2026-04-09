@@ -65,5 +65,5 @@ def fetch_adzuna() -> list[Job]:
                 is_remote="remote" in item.get("title", "").lower() or
                           "remote" in item.get("description", "").lower()[:200],
             ))
-    log.info(f"Adzuna: fetched {len(jobs)} jobs.")
+    log.debug(f"Adzuna: fetched {len(jobs)} jobs.")
     return jobs

@@ -36,5 +36,5 @@ def fetch_jobicy() -> list[Job]:
                 tags=[item.get("jobIndustry", "")] if item.get("jobIndustry") else [],
                 is_remote=True,
             ))
-    log.info(f"Jobicy: fetched {len(jobs)} jobs.")
+    log.debug(f"Jobicy: fetched {len(jobs)} jobs.")
     return jobs

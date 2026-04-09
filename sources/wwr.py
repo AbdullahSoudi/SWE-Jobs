@@ -47,5 +47,5 @@ def fetch_wwr() -> list[Job]:
         except ET.ParseError as e:
             log.warning(f"WWR: XML parse error for {category}: {e}")
 
-    log.info(f"WWR: fetched {len(jobs)} jobs.")
+    log.debug(f"WWR: fetched {len(jobs)} jobs.")
     return jobs

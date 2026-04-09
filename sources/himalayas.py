@@ -36,7 +36,7 @@ def fetch_himalayas() -> list[Job]:
                 tags=item.get("categories", []) or [],
                 is_remote=remote,
             ))
-    log.info(f"Himalayas: fetched {len(jobs)} jobs.")
+    log.debug(f"Himalayas: fetched {len(jobs)} jobs.")
     return jobs
 
 

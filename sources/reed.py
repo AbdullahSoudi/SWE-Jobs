@@ -54,5 +54,5 @@ def fetch_reed() -> list[Job]:
                 is_remote="remote" in item.get("jobTitle", "").lower() or
                           "remote" in item.get("jobDescription", "").lower()[:200],
             ))
-    log.info(f"Reed: fetched {len(jobs)} jobs.")
+    log.debug(f"Reed: fetched {len(jobs)} jobs.")
     return jobs

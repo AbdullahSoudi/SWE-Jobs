@@ -73,7 +73,7 @@ def fetch_linkedin() -> list[Job]:
 
         time.sleep(REQUEST_DELAY)
 
-    log.info(f"LinkedIn: fetched {len(jobs)} jobs.")
+    log.debug(f"LinkedIn: fetched {len(jobs)} jobs.")
     return jobs
 
 

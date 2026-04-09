@@ -25,6 +25,10 @@ def fetch_findwork() -> list[Job]:
         data = get_json(URL, params={"search": search, "remote": "true"},
                        headers=headers)
         if not data or "results" not in data:
+            # If first query fails, likely a bad API key — skip remaining
+            if not jobs and data is None:
+                log.warning("Findwork: API request failed — check FINDWORK_API_KEY.")
+                return []
             continue
         for item in data["results"]:
             keywords = item.get("keywords", []) or []
@@ -40,5 +44,5 @@ def fetch_findwork() -> list[Job]:
                 tags=keywords,
                 is_remote=item.get("remote", False),
             ))
-    log.info(f"Findwork: fetched {len(jobs)} jobs.")
+    log.debug(f"Findwork: fetched {len(jobs)} jobs.")
     return jobs

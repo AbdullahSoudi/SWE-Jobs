@@ -63,5 +63,5 @@ def fetch_jooble() -> list[Job]:
                 tags=[],
                 is_remote=is_remote,
             ))
-    log.info(f"Jooble: fetched {len(jobs)} jobs.")
+    log.debug(f"Jooble: fetched {len(jobs)} jobs.")
     return jobs

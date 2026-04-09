@@ -69,5 +69,5 @@ def fetch_usajobs() -> list[Job]:
                 tags=[],
                 is_remote=True,
             ))
-    log.info(f"USAJobs: fetched {len(jobs)} jobs.")
+    log.debug(f"USAJobs: fetched {len(jobs)} jobs.")
     return jobs

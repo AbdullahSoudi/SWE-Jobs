@@ -40,7 +40,7 @@ def fetch_workingnomads() -> list[Job]:
             tags=[cat] if cat else [],
             is_remote=True,
         ))
-    log.info(f"Working Nomads: fetched {len(jobs)} jobs.")
+    log.debug(f"Working Nomads: fetched {len(jobs)} jobs.")
     return jobs
 
 
@@ -66,5 +66,5 @@ def _parse_rss(xml_text: str) -> list[Job]:
             ))
     except ET.ParseError as e:
         log.warning(f"Working Nomads RSS parse error: {e}")
-    log.info(f"Working Nomads: fetched {len(jobs)} jobs (RSS fallback).")
+    log.debug(f"Working Nomads: fetched {len(jobs)} jobs (RSS fallback).")
     return jobs

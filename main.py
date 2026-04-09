@@ -14,7 +14,7 @@ from core.config import MAX_JOBS_PER_RUN, SEED_MODE_ENV, TELEGRAM_BOT_TOKEN
 from core import db
 from core.enrichment import enrich_job
 from core.filtering import filter_jobs
-from core.dedup import deduplicate_batch, fuzzy_dedup_against_db
+from core.dedup import deduplicate_batch
 from core.circuit_breaker import fetch_with_retry
 from sources import ALL_FETCHERS
 
@@ -35,19 +35,28 @@ async def main():
     if is_seed:
         log.info("SEED MODE: will register all jobs without sending")
 
-    # ── 2. Fetch from all sources (with circuit breaker) ────
+    # ── 2. Fetch from all sources in parallel ────────────────
+    async def _fetch_one(name, source_key, fetcher):
+        jobs = await asyncio.to_thread(fetch_with_retry, source_key, fetcher)
+        return name, source_key, jobs
+
+    log.info(f"Fetching from {len(ALL_FETCHERS)} sources in parallel...")
+    fetch_tasks = [
+        _fetch_one(name, key, fetcher)
+        for name, key, fetcher in ALL_FETCHERS
+    ]
+    results = await asyncio.gather(*fetch_tasks)
+
     all_jobs = []
-    for name, source_key, fetcher in ALL_FETCHERS:
-        log.info(f"Fetching from {name}...")
-        jobs = fetch_with_retry(source_key, fetcher)
+    fetch_summary = []
+    for name, source_key, jobs in results:
         all_jobs.extend(jobs)
         source_stats[source_key] = len(jobs)
         if not jobs:
             errors.append({"source": source_key, "error": "no jobs returned"})
-        else:
-            log.info(f"  {name}: {len(jobs)} raw jobs")
+        fetch_summary.append(f"{name}={len(jobs)}")
 
-    log.info(f"Total raw jobs: {len(all_jobs)}")
+    log.info(f"Fetched {len(all_jobs)} jobs: {', '.join(fetch_summary)}")
 
     # ── 3. Enrich all jobs ──────────────────────────────────
     for job in all_jobs:
@@ -65,19 +74,15 @@ async def main():
     new_jobs = deduplicate_batch(filtered, seen_ids)
     log.info(f"New jobs: {len(new_jobs)}")
 
-    # ── 6. Insert into DB + fuzzy dedup ─────────────────────
-    inserted_jobs = []  # List of (Job, db_id) tuples
-    for job in new_jobs:
-        # Check fuzzy duplicate
-        dupe_id = fuzzy_dedup_against_db(job, db)
-        if dupe_id:
-            log.debug(f"Fuzzy dupe: {job.title} matches existing #{dupe_id}")
-            continue
+    # ── 6. Fuzzy dedup + batch insert ─────────────────────
+    non_dupes = db.fuzzy_dedup_batch(new_jobs)
+    fuzzy_dupes = len(new_jobs) - len(non_dupes)
+    log.info(f"Fuzzy dedup: {fuzzy_dupes} duplicates removed, {len(non_dupes)} remaining")
 
-        result = db.insert_job(job)
-        if result:
-            inserted_jobs.append((job, result["id"]))
-
+    inserted_rows = db.insert_jobs_batch(non_dupes)
+    # Build (Job, db_id) list for sending
+    uid_to_job = {job.unique_id: job for job in non_dupes}
+    inserted_jobs = [(uid_to_job[row["unique_id"]], row["id"]) for row in inserted_rows]
     log.info(f"Inserted: {len(inserted_jobs)} jobs")
 
     # ── 7. Send or seed ─────────────────────────────────────

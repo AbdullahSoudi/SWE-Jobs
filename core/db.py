@@ -164,6 +164,82 @@ def insert_job(job) -> Optional[dict]:
     return _execute(sql, row)
 
 
+def insert_jobs_batch(jobs: list) -> list[dict]:
+    """
+    Batch-insert multiple Jobs in a single transaction using execute_values.
+    Skips duplicates by unique_id (ON CONFLICT DO NOTHING).
+
+    Returns list of inserted row dicts (with id and unique_id).
+    """
+    if not jobs:
+        return []
+
+    rows = [job.to_db_row() for job in jobs]
+    columns = list(rows[0].keys())
+    col_str = ", ".join(columns)
+    template = "(" + ", ".join(f"%({k})s" for k in columns) + ")"
+    sql = (
+        f"INSERT INTO jobs ({col_str}) VALUES %s "
+        f"ON CONFLICT (unique_id) DO NOTHING "
+        f"RETURNING id, unique_id"
+    )
+
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            result = psycopg2.extras.execute_values(
+                cur, sql, rows,
+                template=template,
+                page_size=100,
+                fetch=True,
+            )
+            inserted = [dict(r) for r in result]
+    return inserted
+
+
+def fuzzy_dedup_batch(jobs: list) -> list:
+    """
+    Filter out fuzzy duplicates against the DB.
+    Fetches recent DB jobs once, then compares in Python using
+    SequenceMatcher (avoids N individual DB round trips).
+
+    Returns the list of jobs that are NOT fuzzy duplicates.
+    """
+    if not jobs:
+        return []
+
+    # Fetch all recent titles+companies in one query
+    existing = _fetchall(
+        "SELECT id, lower(title) AS title, lower(company) AS company "
+        "FROM jobs WHERE created_at > now() - INTERVAL '7 days'"
+    )
+    if not existing:
+        logger.info("Fuzzy dedup: skipped (no recent jobs in DB)")
+        return jobs
+
+    # Group by company for fast lookup
+    from collections import defaultdict
+    from difflib import SequenceMatcher
+    by_company: dict[str, list[str]] = defaultdict(list)
+    for row in existing:
+        by_company[row["company"]].append(row["title"])
+
+    kept = []
+    for job in jobs:
+        company_lower = job.company.lower()
+        if company_lower not in by_company:
+            kept.append(job)
+            continue
+        title_lower = job.title.lower()
+        is_dupe = any(
+            SequenceMatcher(None, title_lower, existing_title).ratio() > 0.7
+            for existing_title in by_company[company_lower]
+        )
+        if not is_dupe:
+            kept.append(job)
+
+    return kept
+
+
 def job_exists(unique_id: str) -> bool:
     """Return True if a job with the given unique_id already exists."""
     row = _fetchone(

@@ -32,5 +32,5 @@ def fetch_arbeitnow() -> list[Job]:
             tags=tags,
             is_remote=is_remote,
         ))
-    log.info(f"Arbeitnow: fetched {len(jobs)} jobs.")
+    log.debug(f"Arbeitnow: fetched {len(jobs)} jobs.")
     return jobs

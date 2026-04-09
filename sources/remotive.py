@@ -30,5 +30,5 @@ def fetch_remotive() -> list[Job]:
                 tags=[item.get("category", "")],
                 is_remote=True,
             ))
-    log.info(f"Remotive: fetched {len(jobs)} jobs.")
+    log.debug(f"Remotive: fetched {len(jobs)} jobs.")
     return jobs

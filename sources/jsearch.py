@@ -60,7 +60,7 @@ def fetch_jsearch() -> list[Job]:
 
     jobs = []
     for params in SEARCHES:
-        data = get_json(URL, params=params, headers=headers)
+        data = get_json(URL, params=params, headers=headers, timeout=30)
         if not data or "data" not in data:
             continue
         for item in data["data"]:
@@ -92,7 +92,7 @@ def fetch_jsearch() -> list[Job]:
                 is_remote=item.get("job_is_remote", False),
                 original_source=original_source,
             ))
-    log.info(f"JSearch: fetched {len(jobs)} jobs.")
+    log.debug(f"JSearch: fetched {len(jobs)} jobs.")
     return jobs
 
 
