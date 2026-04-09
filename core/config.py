@@ -28,8 +28,8 @@ SUPABASE_DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 # Telegram
 # =============================================================================
 
-TELEGRAM_BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
-TELEGRAM_GROUP_ID: str = os.getenv("GROUP_ID", "")
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_GROUP_ID: str = os.getenv("TELEGRAM_GROUP_ID", "")
 TELEGRAM_SEND_DELAY: int = 3  # seconds between messages
 
 # =============================================================================
