@@ -48,7 +48,7 @@ def fetch_reed() -> list[Job]:
                 location=item.get("locationName", ""),
                 url=job_url,
                 source="reed",
-                salary=salary,
+                salary_raw=salary,
                 job_type=item.get("contractType", ""),
                 tags=[],
                 is_remote="remote" in item.get("jobTitle", "").lower() or

@@ -25,7 +25,7 @@ def fetch_remotive() -> list[Job]:
                 location=item.get("candidate_required_location", "Anywhere"),
                 url=item.get("url", ""),
                 source="remotive",
-                salary=item.get("salary", ""),
+                salary_raw=item.get("salary", ""),
                 job_type=item.get("job_type", "").replace("_", " ").title(),
                 tags=[item.get("category", "")],
                 is_remote=True,

@@ -64,7 +64,7 @@ def fetch_usajobs() -> list[Job]:
                 location=location,
                 url=apply_url or url,
                 source="usajobs",
-                salary=salary,
+                salary_raw=salary,
                 job_type=job_type,
                 tags=[],
                 is_remote=True,

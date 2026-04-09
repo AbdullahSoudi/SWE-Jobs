@@ -59,7 +59,7 @@ def fetch_adzuna() -> list[Job]:
                 location=location,
                 url=item.get("redirect_url", ""),
                 source="adzuna",
-                salary=salary,
+                salary_raw=salary,
                 job_type=item.get("contract_time", ""),
                 tags=[item.get("category", {}).get("label", "")],
                 is_remote="remote" in item.get("title", "").lower() or

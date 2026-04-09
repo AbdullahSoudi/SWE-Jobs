@@ -31,7 +31,7 @@ def fetch_jobicy() -> list[Job]:
                 location=item.get("jobGeo", "Remote"),
                 url=item.get("url", ""),
                 source="jobicy",
-                salary=salary,
+                salary_raw=salary,
                 job_type=item.get("jobType", ""),
                 tags=[item.get("jobIndustry", "")] if item.get("jobIndustry") else [],
                 is_remote=True,

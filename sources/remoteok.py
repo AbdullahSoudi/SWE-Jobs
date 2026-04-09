@@ -30,7 +30,7 @@ def fetch_remoteok() -> list[Job]:
             location=item.get("location", "Remote"),
             url=item.get("url", f"https://remoteok.com/remote-jobs/{item.get('id', '')}"),
             source="remoteok",
-            salary=salary,
+            salary_raw=salary,
             job_type="",
             tags=item.get("tags", []) or [],
             is_remote=True,

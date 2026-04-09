@@ -58,7 +58,7 @@ def fetch_jooble() -> list[Job]:
                 location=location or search["location"],
                 url=item.get("link", ""),
                 source="jooble",
-                salary=salary,
+                salary_raw=salary,
                 job_type=item.get("type", ""),
                 tags=[],
                 is_remote=is_remote,

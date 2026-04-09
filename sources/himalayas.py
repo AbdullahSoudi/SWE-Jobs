@@ -31,7 +31,7 @@ def fetch_himalayas() -> list[Job]:
                 location=location or "Remote",
                 url=item.get("applicationLink") or f"https://himalayas.app/jobs/{item.get('slug', '')}",
                 source="himalayas",
-                salary=_format_salary(item),
+                salary_raw=_format_salary(item),
                 job_type=item.get("employmentType", ""),
                 tags=item.get("categories", []) or [],
                 is_remote=remote,

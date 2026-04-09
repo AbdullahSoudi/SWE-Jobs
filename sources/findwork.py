@@ -35,7 +35,7 @@ def fetch_findwork() -> list[Job]:
                 location=item.get("location", "Remote"),
                 url=item.get("url", ""),
                 source="findwork",
-                salary="",
+                salary_raw="",
                 job_type=item.get("employment_type", ""),
                 tags=keywords,
                 is_remote=item.get("remote", False),

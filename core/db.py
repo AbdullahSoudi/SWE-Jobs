@@ -328,10 +328,10 @@ def upsert_source_health(source: str, success: bool, error: str = "") -> None:
     if success:
         _execute(
             """
-            INSERT INTO source_health (source, last_success, consecutive_failures, last_error)
+            INSERT INTO source_health (source, last_success_at, consecutive_failures, last_error)
             VALUES (%s, now(), 0, '')
             ON CONFLICT (source) DO UPDATE SET
-                last_success          = now(),
+                last_success_at       = now(),
                 consecutive_failures  = 0,
                 circuit_open_until    = NULL,
                 last_error            = ''
@@ -341,10 +341,10 @@ def upsert_source_health(source: str, success: bool, error: str = "") -> None:
     else:
         _execute(
             """
-            INSERT INTO source_health (source, last_failure, consecutive_failures, last_error)
+            INSERT INTO source_health (source, last_failure_at, consecutive_failures, last_error)
             VALUES (%s, now(), 1, %s)
             ON CONFLICT (source) DO UPDATE SET
-                last_failure         = now(),
+                last_failure_at      = now(),
                 consecutive_failures = source_health.consecutive_failures + 1,
                 last_error           = %s,
                 circuit_open_until   = CASE

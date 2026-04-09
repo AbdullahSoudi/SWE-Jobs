@@ -27,7 +27,7 @@ def fetch_arbeitnow() -> list[Job]:
             location=item.get("location", ""),
             url=item.get("url", ""),
             source="arbeitnow",
-            salary="",
+            salary_raw="",
             job_type="",
             tags=tags,
             is_remote=is_remote,
