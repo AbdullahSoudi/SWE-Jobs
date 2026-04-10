@@ -58,3 +58,4 @@ MAX_JOBS_PER_RUN: int = 50       # safety cap per run
 REQUEST_TIMEOUT: int = 15        # seconds for HTTP requests
 SEED_MODE_ENV: str = "SEED_MODE" # env var name checked to force seed mode
 SEEN_JOBS_FILE: str = "seen_jobs.json"
+FETCH_INTERVAL_MINUTES: int = int(os.getenv("FETCH_INTERVAL_MINUTES", "5"))
