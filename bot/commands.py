@@ -25,6 +25,9 @@ HELP_TEXT = """
 /mysubs — View your current filters
 /search — Search jobs interactively
 /saved — View your saved jobs
+/applied — View your application history
+/streak — Your daily application streak
+/blacklist — Manage blocked companies/keywords
 /stats — Bot statistics
 /top — Top jobs this week
 /salary — Salary insights
@@ -34,7 +37,7 @@ HELP_TEXT = """
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 Welcome! I post programming jobs from 15 sources.\n\n"
+        "👋 Welcome! I post programming jobs from 23 sources.\n\n"
         "Use /subscribe to get personalized alerts, or /help for all commands.",
         parse_mode="HTML",
     )
@@ -280,3 +283,167 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Range: ${int(stats['lowest']):,} - ${int(stats['highest']):,}/year",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# ── Application tracking ────────────────────────────────────
+
+
+async def cmd_applied(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the user's application history."""
+    user = update.effective_user
+    db_user = db.get_or_create_user(user.id, user.username or "")
+
+    total = db.get_application_count(db_user["id"])
+    if total == 0:
+        await update.message.reply_text(
+            "No applications tracked yet.\n"
+            "Tap ✅ Applied on any job post to start tracking!"
+        )
+        return
+
+    rows = db.get_application_history(db_user["id"], limit=10)
+
+    lines = [f"📋 <b>Application History</b> ({total} total)\n"]
+    for row in rows:
+        title = _escape_html(row["title"])
+        company = _escape_html(row.get("company", ""))
+        applied_at = row["applied_at"].strftime("%b %d")
+        lines.append(f"• <b>{title}</b> at {company} — {applied_at}")
+
+    streak = db.get_streak(db_user["id"])
+    lines.append(f"\n🔥 Current streak: {streak['current']} day{'s' if streak['current'] != 1 else ''}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_streak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the user's application streak."""
+    user = update.effective_user
+    db_user = db.get_or_create_user(user.id, user.username or "")
+
+    streak = db.get_streak(db_user["id"])
+    total = db.get_application_count(db_user["id"])
+
+    if total == 0:
+        await update.message.reply_text(
+            "No applications tracked yet.\n"
+            "Tap ✅ Applied on any job post to start your streak!"
+        )
+        return
+
+    today_check = "✅ Applied today!" if streak["today"] else "⬜ Not yet applied today"
+
+    lines = [
+        "🔥 <b>Application Streak</b>\n",
+        f"Current streak: <b>{streak['current']}</b> day{'s' if streak['current'] != 1 else ''}",
+        f"Longest streak: <b>{streak['longest']}</b> day{'s' if streak['longest'] != 1 else ''}",
+        f"Total applications: <b>{total}</b>",
+        f"\n{today_check}",
+    ]
+
+    # Motivational nudge
+    if streak["current"] >= 7:
+        lines.append("\n🏆 Amazing consistency! Keep it up!")
+    elif streak["current"] >= 3:
+        lines.append("\n💪 Great momentum! Don't break the chain!")
+    elif not streak["today"]:
+        lines.append("\n👉 Apply to a job today to keep your streak alive!")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# ── Blacklist ───────────────────────────────────────────────
+
+
+def _escape_html(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manage blacklisted companies and keywords.
+
+    Usage:
+        /blacklist                      — view current blacklist
+        /blacklist add company Acme     — block a company
+        /blacklist add keyword recruiter — block a keyword
+        /blacklist remove company Acme  — unblock a company
+        /blacklist remove keyword recruiter — unblock a keyword
+        /blacklist clear                — clear entire blacklist
+    """
+    user = update.effective_user
+    db_user = db.get_or_create_user(user.id, user.username or "")
+    args = context.args or []
+
+    bl = db.get_blacklist(db_user["id"])
+
+    # No args — show current blacklist
+    if not args:
+        if not bl["companies"] and not bl["keywords"]:
+            await update.message.reply_text(
+                "Your blacklist is empty.\n\n"
+                "<b>Usage:</b>\n"
+                "/blacklist add company Acme Corp\n"
+                "/blacklist add keyword recruiter\n"
+                "/blacklist remove company Acme Corp\n"
+                "/blacklist clear",
+                parse_mode="HTML",
+            )
+            return
+
+        lines = ["🚫 <b>Your Blacklist</b>\n"]
+        if bl["companies"]:
+            lines.append("<b>Companies:</b>")
+            for c in bl["companies"]:
+                lines.append(f"  • {_escape_html(c)}")
+        if bl["keywords"]:
+            lines.append("<b>Keywords:</b>")
+            for k in bl["keywords"]:
+                lines.append(f"  • {_escape_html(k)}")
+        lines.append("\nJobs matching these are excluded from your DM alerts.")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    action = args[0].lower()
+
+    if action == "clear":
+        db.update_blacklist(db_user["id"], {"companies": [], "keywords": []})
+        await update.message.reply_text("✅ Blacklist cleared.")
+        return
+
+    if action not in ("add", "remove") or len(args) < 3:
+        await update.message.reply_text(
+            "Usage: /blacklist add|remove company|keyword <value>\n"
+            "Example: /blacklist add company Acme Corp"
+        )
+        return
+
+    category = args[1].lower()
+    value = " ".join(args[2:])
+
+    if category not in ("company", "keyword"):
+        await update.message.reply_text("Category must be 'company' or 'keyword'.")
+        return
+
+    list_key = "companies" if category == "company" else "keywords"
+
+    if action == "add":
+        if value.lower() not in [v.lower() for v in bl[list_key]]:
+            bl[list_key].append(value)
+            db.update_blacklist(db_user["id"], bl)
+            await update.message.reply_text(f"✅ Added {category} '{_escape_html(value)}' to blacklist.", parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"Already blacklisted.")
+
+    elif action == "remove":
+        lower_values = [v.lower() for v in bl[list_key]]
+        if value.lower() in lower_values:
+            idx = lower_values.index(value.lower())
+            bl[list_key].pop(idx)
+            db.update_blacklist(db_user["id"], bl)
+            await update.message.reply_text(f"✅ Removed {category} '{_escape_html(value)}' from blacklist.", parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"'{_escape_html(value)}' not found in blacklist.", parse_mode="HTML")

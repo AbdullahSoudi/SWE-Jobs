@@ -10,10 +10,13 @@ def job_buttons(job_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("💾 Save", callback_data=f"save:{job_id}"),
+            InlineKeyboardButton("✅ Applied", callback_data=f"applied:{job_id}"),
             InlineKeyboardButton("📤 Share", callback_data=f"share:{job_id}"),
+        ],
+        [
             InlineKeyboardButton("🔍 Similar", callback_data=f"similar:{job_id}"),
             InlineKeyboardButton("👎 Not Relevant", callback_data=f"not_relevant:{job_id}"),
-        ]
+        ],
     ])
 
 
@@ -131,7 +134,16 @@ SOURCE_OPTIONS = [
     ("themuse", "The Muse"),
     ("jooble", "Jooble"),
     ("reed", "Reed"),
+    ("findwork", "Findwork"),
     ("usajobs", "USAJobs"),
+    ("devitjobs", "DevITjobs"),
+    ("stackoverflow", "StackOverflow"),
+    ("greenhouse", "Greenhouse"),
+    ("lever", "Lever"),
+    ("workable", "Workable"),
+    ("recruitee", "Recruitee"),
+    ("ashby", "Ashby"),
+    ("smartrecruiters", "SmartRecruiters"),
 ]
 
 

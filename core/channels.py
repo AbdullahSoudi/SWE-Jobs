@@ -319,4 +319,12 @@ SOURCE_DISPLAY = {
     "reed": "Reed",
     "careerjet": "Careerjet",
     "usajobs": "USAJobs",
+    "devitjobs": "DevITjobs",
+    "stackoverflow": "StackOverflow",
+    "greenhouse": "Greenhouse",
+    "lever": "Lever",
+    "workable": "Workable",
+    "recruitee": "Recruitee",
+    "ashby": "Ashby",
+    "smartrecruiters": "SmartRecruiters",
 }

@@ -76,6 +76,24 @@ def _job_matches_subscription(job: Job, subs: dict) -> bool:
     return True
 
 
+def _job_blocked_by_blacklist(job: Job, blacklist: dict) -> bool:
+    """Check if a job is blocked by the user's blacklist."""
+    if not blacklist:
+        return False
+
+    company_lower = job.company.lower()
+    for blocked in blacklist.get("companies", []):
+        if blocked.lower() in company_lower:
+            return True
+
+    searchable = f"{job.title} {job.company}".lower()
+    for kw in blacklist.get("keywords", []):
+        if kw.lower() in searchable:
+            return True
+
+    return False
+
+
 async def notify_subscribers(bot: Bot, jobs: list[tuple[Job, int]]) -> int:
     """
     Send DM alerts to subscribed users for matching jobs.
@@ -100,6 +118,7 @@ async def notify_subscribers(bot: Bot, jobs: list[tuple[Job, int]]) -> int:
     for user_row in users:
         subs = user_row.get("subscriptions", {})
         telegram_id = user_row["telegram_id"]
+        blacklist = db.get_blacklist(user_row["id"])
         dm_count = 0
 
         for job, db_id in jobs:
@@ -108,6 +127,9 @@ async def notify_subscribers(bot: Bot, jobs: list[tuple[Job, int]]) -> int:
                 break
 
             if not _job_matches_subscription(job, subs):
+                continue
+
+            if _job_blocked_by_blacklist(job, blacklist):
                 continue
 
             try:

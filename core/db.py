@@ -561,3 +561,126 @@ def add_feedback(job_id: int, user_id: int, feedback_type: str) -> None:
         """,
         (job_id, user_id, feedback_type),
     )
+
+
+# =============================================================================
+# User Applications
+# =============================================================================
+
+def mark_applied(user_id: int, job_id: int) -> bool:
+    """
+    Record that a user applied to a job.
+    Returns True if newly recorded, False if already existed.
+    """
+    row = _fetchone(
+        """
+        INSERT INTO user_applications (user_id, job_id)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        """,
+        (user_id, job_id),
+    )
+    return row is not None
+
+
+def get_application_count(user_id: int) -> int:
+    """Return total number of applications for a user."""
+    row = _fetchone(
+        "SELECT COUNT(*) as count FROM user_applications WHERE user_id = %s",
+        (user_id,),
+    )
+    return row["count"] if row else 0
+
+
+def get_application_history(user_id: int, limit: int = 10, offset: int = 0) -> list:
+    """Return applied jobs for a user, most recent first."""
+    rows = _fetchall(
+        """
+        SELECT j.*, ua.applied_at
+        FROM user_applications ua
+        JOIN jobs j ON j.id = ua.job_id
+        WHERE ua.user_id = %s
+        ORDER BY ua.applied_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        (user_id, limit, offset),
+    )
+    return rows
+
+
+def get_streak(user_id: int) -> dict:
+    """
+    Calculate the user's application streak.
+    Returns {"current": int, "longest": int, "today": bool}.
+    A streak day = at least one application on that calendar day (UTC).
+    """
+    rows = _fetchall(
+        """
+        SELECT DISTINCT (applied_at AT TIME ZONE 'UTC')::date AS day
+        FROM user_applications
+        WHERE user_id = %s
+        ORDER BY day DESC
+        """,
+        (user_id,),
+    )
+
+    if not rows:
+        return {"current": 0, "longest": 0, "today": False}
+
+    from datetime import date, timedelta
+    days = [row["day"] for row in rows]
+    today = date.today()
+
+    applied_today = days[0] == today
+
+    # Current streak: consecutive days ending today or yesterday
+    current = 0
+    expected = today if applied_today else today - timedelta(days=1)
+    for d in days:
+        if d == expected:
+            current += 1
+            expected -= timedelta(days=1)
+        elif d < expected:
+            break
+
+    # Longest streak
+    longest = 1
+    run = 1
+    for i in range(1, len(days)):
+        if days[i] == days[i - 1] - timedelta(days=1):
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 1
+
+    return {"current": current, "longest": longest, "today": applied_today}
+
+
+# =============================================================================
+# Blacklist
+# =============================================================================
+
+def get_blacklist(user_id: int) -> dict:
+    """Return the user's blacklist: {"companies": [...], "keywords": [...]}."""
+    row = _fetchone(
+        "SELECT blacklist FROM users WHERE id = %s",
+        (user_id,),
+    )
+    if not row or not row.get("blacklist"):
+        return {"companies": [], "keywords": []}
+    bl = row["blacklist"]
+    if isinstance(bl, str):
+        bl = json.loads(bl)
+    return {
+        "companies": bl.get("companies", []),
+        "keywords": bl.get("keywords", []),
+    }
+
+
+def update_blacklist(user_id: int, blacklist: dict) -> None:
+    """Persist a user's blacklist."""
+    _execute(
+        "UPDATE users SET blacklist = %s WHERE id = %s",
+        (json.dumps(blacklist), user_id),
+    )

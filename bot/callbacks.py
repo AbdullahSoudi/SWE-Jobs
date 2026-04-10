@@ -28,6 +28,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("save:"):
         await _handle_save(query, user, data)
+    elif data.startswith("applied:"):
+        await _handle_applied(query, user, data)
     elif data.startswith("share:"):
         await _handle_share(query, user, data)
     elif data.startswith("similar:"):
@@ -70,6 +72,28 @@ async def _handle_save(query, user, data: str) -> None:
         await query.answer("💾 Saved!", show_alert=False)
     else:
         await query.answer("Already saved", show_alert=False)
+
+
+async def _handle_applied(query, user, data: str) -> None:
+    """Record that the user applied to this job."""
+    job_id = int(data.split(":")[1])
+    db_user = db.get_or_create_user(user.id, user.username or "")
+    is_new = db.mark_applied(db_user["id"], job_id)
+
+    if is_new:
+        streak = db.get_streak(db_user["id"])
+        total = db.get_application_count(db_user["id"])
+        streak_msg = f"🔥 Streak: {streak['current']} day{'s' if streak['current'] != 1 else ''}"
+        try:
+            await query.from_user.send_message(
+                f"✅ Marked as applied! (#{total} total)\n{streak_msg}\n\n"
+                f"Use /applied to see your history, /streak for details."
+            )
+        except Exception:
+            pass
+        await query.answer("✅ Applied!", show_alert=False)
+    else:
+        await query.answer("Already marked as applied", show_alert=False)
 
 
 async def _handle_share(query, user, data: str) -> None:
