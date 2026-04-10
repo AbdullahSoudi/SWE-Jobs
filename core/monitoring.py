@@ -67,12 +67,19 @@ async def check_alerts(bot: Bot, run_id: int) -> list[str]:
                 alerts.append(msg)
 
         # Alert: Telegram send success rate below 80%
-        if run["jobs_new"] > 0 and run["jobs_sent"] > 0:
-            success_rate = run["jobs_sent"] / run["jobs_new"]
+        # jobs_sent     = jobs delivered to at least one topic
+        # jobs_attempted = jobs we actually tried to send (from source_stats)
+        stats = run.get("source_stats") or {}
+        if isinstance(stats, str):
+            import json as _json
+            stats = _json.loads(stats)
+        jobs_attempted = stats.get("_jobs_attempted", 0)
+        if jobs_attempted > 0:
+            success_rate = run["jobs_sent"] / jobs_attempted
             if success_rate < 0.8:
                 msg = (
                     f"📉 <b>ALERT: Low send rate</b>\n"
-                    f"Sent {run['jobs_sent']}/{run['jobs_new']} "
+                    f"Delivered {run['jobs_sent']}/{jobs_attempted} jobs "
                     f"({success_rate:.0%} success rate)"
                 )
                 await send_admin_alert(bot, msg)

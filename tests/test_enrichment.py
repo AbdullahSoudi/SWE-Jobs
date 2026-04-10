@@ -33,7 +33,12 @@ class TestEnrichJob:
         enriched = enrich_job(job)
         assert "mobile" in enriched.topics
         assert "egypt" in enriched.topics
-        assert "general" in enriched.topics
+        assert "general" not in enriched.topics  # general is fallback only
+
+    def test_general_fallback_when_no_topic_matched(self):
+        job = _make_job(title="Miscellaneous Role", location="Unknown")
+        enriched = enrich_job(job)
+        assert enriched.topics == ["general"]
 
     def test_no_salary_leaves_none(self):
         job = _make_job(title="Dev", salary_raw="Competitive")

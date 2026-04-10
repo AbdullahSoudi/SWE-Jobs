@@ -31,15 +31,19 @@ def _is_saudi_location(location: str) -> bool:
 
 
 def _route_topics(job: Job) -> list[str]:
-    """Determine which topics a job should be sent to."""
+    """Determine which topics a job should be sent to.
+
+    General topic is a fallback — only used when no specific topic matched.
+    """
     topics = []
+    fallback_keys = []
     tags_str = _flatten_tags(job.tags)
     searchable = f"{job.title} {job.company} {tags_str}".lower()
 
     for key, ch in CHANNELS.items():
         match_type = ch.get("match", "")
         if match_type == "ALL":
-            topics.append(key)
+            fallback_keys.append(key)
         elif match_type == "GEO_EGYPT":
             if _is_egypt_location(job.location):
                 topics.append(key)
@@ -49,6 +53,10 @@ def _route_topics(job: Job) -> list[str]:
         elif "keywords" in ch:
             if _match_keywords(searchable, ch["keywords"]):
                 topics.append(key)
+
+    # Use general/ALL topics only as fallback when nothing else matched
+    if not topics:
+        topics = fallback_keys
 
     return topics
 

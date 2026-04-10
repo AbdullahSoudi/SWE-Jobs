@@ -36,8 +36,12 @@ async def main():
         log.info("SEED MODE: will register all jobs without sending")
 
     # ── 2. Fetch from all sources in parallel ────────────────
+    # Limit concurrency for API-heavy sources that share rate limits.
+    _api_semaphore = asyncio.Semaphore(4)
+
     async def _fetch_one(name, source_key, fetcher):
-        jobs = await asyncio.to_thread(fetch_with_retry, source_key, fetcher)
+        async with _api_semaphore:
+            jobs = await asyncio.to_thread(fetch_with_retry, source_key, fetcher)
         return name, source_key, jobs
 
     log.info(f"Fetching from {len(ALL_FETCHERS)} sources in parallel...")
@@ -87,10 +91,12 @@ async def main():
 
     # ── 7. Send or seed ─────────────────────────────────────
     jobs_sent = 0
+    jobs_attempted = 0
     if is_seed:
         log.info(f"Seed mode: {len(inserted_jobs)} jobs registered (no sending)")
     else:
         to_send = inserted_jobs[:MAX_JOBS_PER_RUN]
+        jobs_attempted = len(to_send)
         if len(inserted_jobs) > MAX_JOBS_PER_RUN:
             log.warning(f"Capped to {MAX_JOBS_PER_RUN} (had {len(inserted_jobs)})")
 
@@ -101,9 +107,9 @@ async def main():
 
             bot = Bot(token=TELEGRAM_BOT_TOKEN)
             async with bot:
-                log.info(f"Sending {len(to_send)} jobs to Telegram...")
+                log.info(f"Sending {jobs_attempted} jobs to Telegram...")
                 jobs_sent = await send_jobs(bot, to_send)
-                log.info(f"Sent {jobs_sent} messages")
+                log.info(f"Delivered {jobs_sent}/{jobs_attempted} jobs")
 
                 # Notify subscribers
                 dm_count = await notify_subscribers(bot, to_send)
@@ -114,6 +120,7 @@ async def main():
             log.info("No new jobs to send")
 
     # ── 8. Finish run tracking ──────────────────────────────
+    source_stats["_jobs_attempted"] = jobs_attempted
     db.finish_run(
         run_id,
         jobs_fetched=len(all_jobs),

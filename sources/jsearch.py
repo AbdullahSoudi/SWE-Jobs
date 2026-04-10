@@ -10,32 +10,28 @@ log = logging.getLogger(__name__)
 
 URL = "https://jsearch.p.rapidapi.com/search"
 
+# Delay (seconds) between consecutive JSearch API calls to avoid 429s.
+REQUEST_DELAY = 2.0
+
 # Sort by date to get newest first. No date filter — dedup handles freshness.
 _BASE_REMOTE = {"remote_jobs_only": "true", "num_pages": "1"}
 _BASE_LOCAL = {"num_pages": "1"}
 
+# Consolidated queries — broader terms cover more roles per request.
 SEARCHES = [
-    # Remote worldwide
+    # Remote worldwide (broad terms that cover sub-specialties)
     {"query": "software engineer remote", **_BASE_REMOTE},
     {"query": "backend developer remote", **_BASE_REMOTE},
     {"query": "frontend developer remote", **_BASE_REMOTE},
+    {"query": "mobile developer remote", **_BASE_REMOTE},
     {"query": "devops engineer remote", **_BASE_REMOTE},
-    {"query": "flutter developer remote", **_BASE_REMOTE},
-    {"query": "mobile app developer remote", **_BASE_REMOTE},
-    {"query": "data scientist remote", **_BASE_REMOTE},
-    {"query": "machine learning engineer remote", **_BASE_REMOTE},
-    {"query": "QA engineer remote", **_BASE_REMOTE},
-    {"query": "react developer remote", **_BASE_REMOTE},
+    {"query": "data scientist machine learning remote", **_BASE_REMOTE},
     # Egypt onsite
-    {"query": "software engineer in Egypt", **_BASE_LOCAL},
-    {"query": "software developer in Cairo, Egypt", **_BASE_LOCAL},
-    {"query": "flutter developer in Egypt", **_BASE_LOCAL},
+    {"query": "software developer in Egypt", **_BASE_LOCAL},
     {"query": "mobile developer in Egypt", **_BASE_LOCAL},
     # Saudi Arabia onsite
-    {"query": "software engineer in Saudi Arabia", **_BASE_LOCAL},
-    {"query": "software developer in Riyadh, Saudi Arabia", **_BASE_LOCAL},
+    {"query": "software developer in Saudi Arabia", **_BASE_LOCAL},
     {"query": "backend developer in Saudi Arabia", **_BASE_LOCAL},
-    {"query": "flutter developer in Saudi Arabia", **_BASE_LOCAL},
 ]
 
 # Map publisher names for display
@@ -62,7 +58,8 @@ def fetch_jsearch() -> list[Job]:
     jobs = []
     for i, params in enumerate(SEARCHES):
         if i > 0:
-            time.sleep(1.5)  # Rate-limit: avoid 429 from RapidAPI
+            log.debug(f"JSearch: waiting {REQUEST_DELAY}s before query {i+1}/{len(SEARCHES)}")
+            time.sleep(REQUEST_DELAY)
         data = get_json(URL, params=params, headers=headers, timeout=30)
         if not data or "data" not in data:
             continue

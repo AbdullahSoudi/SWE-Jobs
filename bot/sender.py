@@ -3,9 +3,10 @@ Job message formatting and sending with inline buttons.
 Replaces the old telegram_sender.py.
 """
 
+import asyncio
 import logging
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 from core.config import TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID, TELEGRAM_SEND_DELAY
 from core.models import Job
@@ -14,6 +15,10 @@ from core import db
 from bot.keyboards import job_buttons
 
 log = logging.getLogger(__name__)
+
+# Retry config for transient Telegram errors
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0  # seconds, doubled each retry
 
 
 def _escape_html(text: str) -> str:
@@ -61,6 +66,26 @@ def format_job_message(job: Job) -> str:
     return "\n".join(lines)
 
 
+async def _send_with_retry(bot: Bot, **kwargs) -> object:
+    """Send a Telegram message with retry on transient errors."""
+    delay = _RETRY_BACKOFF
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return await bot.send_message(**kwargs)
+        except RetryAfter as e:
+            # Telegram explicitly told us to wait
+            wait = e.retry_after + 1
+            log.warning(f"  ⏳ Rate limited, waiting {wait}s (attempt {attempt}/{_MAX_RETRIES})")
+            await asyncio.sleep(wait)
+        except (TimedOut, NetworkError) as e:
+            if attempt == _MAX_RETRIES:
+                raise
+            log.warning(f"  ⏳ Transient error, retrying in {delay}s (attempt {attempt}/{_MAX_RETRIES}): {e}")
+            await asyncio.sleep(delay)
+            delay *= 2
+    return None  # unreachable, last attempt raises
+
+
 async def send_job_to_topics(bot: Bot, job: Job, job_db_id: int) -> dict:
     """
     Send a job to all matching Telegram topics with inline buttons.
@@ -88,7 +113,8 @@ async def send_job_to_topics(bot: Bot, job: Job, job_db_id: int) -> dict:
 
         topic_name = CHANNELS[topic_key]["name"]
         try:
-            result = await bot.send_message(
+            result = await _send_with_retry(
+                bot,
                 chat_id=TELEGRAM_GROUP_ID,
                 text=message,
                 parse_mode="HTML",
@@ -117,9 +143,9 @@ async def send_jobs(bot: Bot, jobs: list[tuple[Job, int]]) -> int:
         bot: Telegram Bot instance
         jobs: List of (Job, db_id) tuples
 
-    Returns: Total successful send count
+    Returns: Number of jobs successfully delivered (sent to at least one topic)
     """
-    total_sent = 0
+    jobs_delivered = 0
     topic_stats = {}
 
     for i, (job, db_id) in enumerate(jobs):
@@ -128,21 +154,22 @@ async def send_jobs(bot: Bot, jobs: list[tuple[Job, int]]) -> int:
         # Update DB with message IDs
         if sent:
             db.mark_job_sent(db_id, sent)
+            jobs_delivered += 1
 
         for t_key in sent:
             topic_stats[t_key] = topic_stats.get(t_key, 0) + 1
-            total_sent += 1
 
         if i < len(jobs) - 1:
             await _async_sleep(TELEGRAM_SEND_DELAY)
 
     if topic_stats:
-        log.info("📊 Topic send summary:")
+        total_topic_sends = sum(topic_stats.values())
+        log.info(f"📊 Send summary: {jobs_delivered}/{len(jobs)} jobs delivered ({total_topic_sends} topic sends)")
         for t_key, count in sorted(topic_stats.items()):
             t_name = CHANNELS.get(t_key, {}).get("name", t_key)
             log.info(f"  {t_name}: {count} jobs")
 
-    return total_sent
+    return jobs_delivered
 
 
 async def _async_sleep(seconds: float) -> None:
