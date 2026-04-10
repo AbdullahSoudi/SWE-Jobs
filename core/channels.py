@@ -327,4 +327,6 @@ SOURCE_DISPLAY = {
     "recruitee": "Recruitee",
     "ashby": "Ashby",
     "smartrecruiters": "SmartRecruiters",
+    "wuzzuf": "Wuzzuf",
+    "x": None,  # Uses original_source ("X (Twitter)")
 }

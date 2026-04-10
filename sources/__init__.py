@@ -25,6 +25,8 @@ from sources.workable import fetch_workable
 from sources.recruitee import fetch_recruitee
 from sources.ashby import fetch_ashby
 from sources.smartrecruiters import fetch_smartrecruiters
+from sources.wuzzuf import fetch_wuzzuf
+from sources.x_jobs import fetch_x_jobs
 
 # (display_name, source_key, fetch_function)
 ALL_FETCHERS = [
@@ -51,4 +53,6 @@ ALL_FETCHERS = [
     ("Recruitee",        "recruitee",        fetch_recruitee),
     ("Ashby",            "ashby",            fetch_ashby),
     ("SmartRecruiters",  "smartrecruiters",  fetch_smartrecruiters),
+    ("Wuzzuf",           "wuzzuf",           fetch_wuzzuf),
+    ("X (Twitter)",      "x",                fetch_x_jobs),
 ]
