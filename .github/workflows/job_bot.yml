@@ -3,7 +3,7 @@ name: Programming Jobs Bot
 on:
   schedule:
     - cron: '*/15 * * * *'  # Every 15 minutes
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:  # Manual trigger.
     inputs:
       seed_mode:
         description: 'Store fetched jobs without sending them'
