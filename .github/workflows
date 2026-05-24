@@ -1,0 +1,107 @@
+name: Programming Jobs Bot
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Every 15 minutes
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      seed_mode:
+        description: 'Store fetched jobs without sending them'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: programming-jobs-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore SQLite database from data branch
+        run: |
+          git fetch origin data || true
+
+          if git checkout origin/data -- jobs.db 2>/dev/null; then
+            echo "jobs.db restored: $(wc -c < jobs.db) bytes"
+          else
+            echo "jobs.db not found yet; db.py will create it during the first run."
+          fi
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
+          SEED_MODE: ${{ github.event.inputs.seed_mode || 'false' }}
+          # Topic Thread IDs (from topic links: t.me/group/N → N)
+          TOPIC_GENERAL: ${{ secrets.TOPIC_GENERAL }}
+          TOPIC_LINKEDIN_ALL: ${{ secrets.TOPIC_LINKEDIN_ALL }}
+          TOPIC_BACKEND: ${{ secrets.TOPIC_BACKEND }}
+          TOPIC_FRONTEND: ${{ secrets.TOPIC_FRONTEND }}
+          TOPIC_MOBILE: ${{ secrets.TOPIC_MOBILE }}
+          TOPIC_DEVOPS: ${{ secrets.TOPIC_DEVOPS }}
+          TOPIC_QA: ${{ secrets.TOPIC_QA }}
+          TOPIC_AI_ML: ${{ secrets.TOPIC_AI_ML }}
+          TOPIC_CYBERSECURITY: ${{ secrets.TOPIC_CYBERSECURITY }}
+          TOPIC_GAMEDEV: ${{ secrets.TOPIC_GAMEDEV }}
+          TOPIC_BLOCKCHAIN: ${{ secrets.TOPIC_BLOCKCHAIN }}
+          TOPIC_EGYPT: ${{ secrets.TOPIC_EGYPT }}
+          TOPIC_SAUDI: ${{ secrets.TOPIC_SAUDI }}
+          TOPIC_INTERNSHIPS: ${{ secrets.TOPIC_INTERNSHIPS }}
+          TOPIC_ERP: ${{ secrets.TOPIC_ERP }}
+          TOPIC_MARKETING: ${{ secrets.TOPIC_MARKETING }}
+          TOPIC_DATA_ENG: ${{ secrets.TOPIC_DATA_ENG }}
+          TOPIC_APP_SUPPORT: ${{ secrets.TOPIC_APP_SUPPORT }}
+          TOPIC_DESIGN: ${{ secrets.TOPIC_DESIGN }}
+          TOPIC_BUSINESS: ${{ secrets.TOPIC_BUSINESS }}
+        run: python main.py
+
+      - name: Save SQLite database to data branch
+        if: always()
+        run: |
+          if [ ! -f jobs.db ]; then
+            echo "jobs.db was not created; nothing to persist."
+            exit 0
+          fi
+
+          mkdir -p /tmp/job-bot-data
+          cp jobs.db /tmp/job-bot-data/jobs.db
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin data 2>/dev/null || true
+          git checkout data 2>/dev/null || git checkout --orphan data
+
+          # Remove the old JSON persistence file if it exists from previous versions.
+          git rm -f seen_jobs.json 2>/dev/null || true
+
+          cp /tmp/job-bot-data/jobs.db jobs.db
+          git add jobs.db
+
+          git diff --cached --quiet && echo "No SQLite database changes to commit" || {
+            git commit -m "Update bot SQLite database [$(date -u +%Y-%m-%dT%H:%M:%SZ)]"
+            git push origin data
+          }
