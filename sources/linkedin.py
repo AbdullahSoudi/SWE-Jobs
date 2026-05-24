@@ -302,18 +302,32 @@ def _extract_relative_age_seconds(card_html: str) -> int | None:
 
 
 def canonicalize_linkedin_url(url: str) -> str:
-    """Remove volatile LinkedIn tracking query params and fragments."""
+    """Return a mobile-friendly canonical LinkedIn job URL.
+
+    LinkedIn guest cards may return locale/subdomain URLs such as
+    eg.linkedin.com/jobs/view/backend-developer-at-x-1234567890?trk=...
+    Telegram/mobile app handoff is more reliable with the plain universal-link
+    shape: https://www.linkedin.com/jobs/view/<job_id>
+    """
     if not url:
         return ""
-    split = urlsplit(html.unescape(url.strip()))
-    scheme = split.scheme.lower() or "https"
-    netloc = split.netloc.lower()
-    path = split.path.rstrip("/") or split.path
 
+    split = urlsplit(html.unescape(url.strip()))
+    path = split.path.rstrip("/") or split.path
+    job_id = extract_linkedin_job_id(path) or extract_linkedin_job_id(url)
+
+    if job_id and "linkedin.com" in split.netloc.lower():
+        return f"https://www.linkedin.com/jobs/view/{job_id}"
+
+    # Fallback for unexpected LinkedIn job URLs where the numeric id is absent.
+    # Strip volatile params/fragments and normalize any locale host (eg.linkedin.com,
+    # sa.linkedin.com, www.linkedin.com) to www.linkedin.com.
+    scheme = "https"
+    netloc = "www.linkedin.com" if "linkedin.com" in split.netloc.lower() else split.netloc.lower()
     kept_query_pairs = []
     for key, value in parse_qsl(split.query, keep_blank_values=True):
         key_l = key.lower()
-        if key_l.startswith("utm_") or key_l in {"refid", "refid", "trk", "ref", "trackingid", "position", "pageNum".lower()}:
+        if key_l.startswith("utm_") or key_l in {"refid", "trk", "ref", "trackingid", "position", "pagenum"}:
             continue
         kept_query_pairs.append((key, value))
 
