@@ -696,3 +696,25 @@ SEED_MODE_ENV = "SEED_MODE"  # env var to force seed mode
 # One-time safety migration for the legacy pending/retry backlog. Jobs older
 # than this are expired instead of being sent as if they were newly discovered.
 LEGACY_BACKLOG_MAX_AGE_MINUTES = int(os.getenv("LEGACY_BACKLOG_MAX_AGE_MINUTES", "120"))
+
+# Fresh-only runtime policy. These are intentionally source-specific because
+# search feeds and snapshot-like category pages provide different evidence.
+LINKEDIN_FRESHNESS_SECONDS = int(os.getenv("LINKEDIN_FRESHNESS_SECONDS", "3600"))
+WUZZUF_OBSERVATION_MAX_AGE_MINUTES = int(os.getenv("WUZZUF_OBSERVATION_MAX_AGE_MINUTES", "60"))
+PENDING_SEND_MAX_AGE_MINUTES = int(os.getenv("PENDING_SEND_MAX_AGE_MINUTES", "60"))
+
+SOURCE_FRESHNESS_POLICIES = {
+    "linkedin": {
+        "max_age_seconds": LINKEDIN_FRESHNESS_SECONDS,
+        "uncertain_fallback": "SOURCE_WINDOW",
+    },
+    "wuzzuf": {
+        "max_age_seconds": WUZZUF_OBSERVATION_MAX_AGE_MINUTES * 60,
+        "uncertain_fallback": "RECENT_OBSERVATION",
+    },
+}
+
+DEFAULT_SOURCE_FRESHNESS_POLICY = {
+    "max_age_seconds": 60 * 60,
+    "uncertain_fallback": "NONE",
+}

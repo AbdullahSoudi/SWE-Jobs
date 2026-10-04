@@ -14,8 +14,11 @@ This version intentionally replaced the old 15-source aggregator with a narrower
 - **Per-topic send tracking**: a job is marked fully sent only after all intended topics succeed.
 - **Retry-safe**: partial Telegram failures are retried only for the failed topics.
 - **Legacy backlog safety**: old pending/retry rows are expired once instead of being replayed as fresh jobs.
-- **Freshness evidence foundation**: publication-time signals are stored with their precision instead of being forced into a fake exact timestamp.
-- **Source state foundation**: successful fetch time, baseline state, and consecutive failures are persisted per source.
+- **Fresh-only send gate**: only newly discovered jobs that are still fresh enough are eligible for Telegram.
+- **Automatic source baseline**: the first successful fetch for a new source is stored without sending, preventing bootstrap floods.
+- **Freshness evidence**: publication-time signals are stored with their precision instead of being forced into a fake exact timestamp.
+- **Coverage-gap safety**: uncertain jobs are not treated as fresh after a source has been unavailable for too long.
+- **Source state**: successful fetch time, baseline state, and consecutive failures are persisted per source.
 - **GitHub Actions only**: no VPS or external database required.
 - **15-minute schedule**: cron runs every 15 minutes.
 
@@ -154,18 +157,9 @@ This prevents overlapping runs from writing to `jobs.db` at the same time.
 
 ## First Run / Seed Mode
 
-The workflow includes a manual `seed_mode` input.
+The workflow still includes a manual `seed_mode` input, but a new source no longer needs seed mode to avoid a bootstrap flood. The runtime automatically treats the source's first successful fetch as a **baseline**: matching jobs are stored and marked skipped, then later runs can notify only newly discovered fresh jobs.
 
-Use seed mode when you want to populate `jobs.db` with current jobs without sending them to Telegram.
-
-Recommended first launch:
-
-1. Go to **Actions → Programming Jobs Bot → Run workflow**.
-2. Set `seed_mode = true`.
-3. Wait until it finishes and creates/saves `jobs.db` on the `data` branch.
-4. Run the workflow again with `seed_mode = false` or let the scheduled runs continue.
-
-If you skip seed mode, the bot may send all currently fetched matching jobs during the first real run.
+Use `seed_mode = true` only when you intentionally want to suppress every currently pending job during a maintenance/manual run.
 
 ## SQLite Tracking
 
@@ -195,6 +189,7 @@ The database tracks:
 - source run status
 - last successful source fetch
 - source baseline state
+- per-job freshness status and reason
 - consecutive source failures
 
 Send statuses include:
@@ -206,13 +201,13 @@ Send statuses include:
 | `partial` | Sent to at least one topic, failed in at least one other topic |
 | `retry` | Send failed and should be retried |
 | `skipped` | No matching topics, or seed mode intentionally skipped sending |
-| `expired` | Legacy unsent job is too old to send as a fresh notification |
+| `expired` | Job is too old, too uncertain, or has exceeded the live-send deadline |
 
 ### Legacy Backlog Safety
 
 On the first run after this update, the bot performs a one-time migration. Any legacy `pending`, `retry`, or `partial` row whose `first_seen_at` is older than `LEGACY_BACKLOG_MAX_AGE_MINUTES` (default: 120 minutes) is marked `expired` and will not be sent. The migration is recorded in the `metadata` table so it runs only once.
 
-This is a compatibility cleanup for the old backlog. The later freshness/outbox refactor will enforce deadlines for newly-created deliveries.
+This remains a compatibility cleanup for the old backlog. In addition, the active runtime expires `pending`, `retry`, and `partial` rows that have waited longer than `PENDING_SEND_MAX_AGE_MINUTES` (default: 60 minutes), so failed Telegram work cannot reappear hours later as a fresh notification.
 
 ## Runtime Flow
 
@@ -221,9 +216,14 @@ fetch WUZZUF + LinkedIn
   ↓
 filter quality + geo rules
   ↓
+new-to-us freshness gate
+  ├─ first source fetch → baseline / no send
+  ├─ fresh enough → pending
+  └─ stale / unsafe uncertainty → expired
+  ↓
 store/update jobs in SQLite
   ↓
-read pending/retry/partial jobs
+read pending/retry/partial jobs (freshest first)
   ↓
 route to Telegram topics
   ↓
@@ -234,21 +234,23 @@ record topic-level result
 commit jobs.db to data branch
 ```
 
-## Freshness Evidence Foundation
+## Active Freshness Gate
 
-Schema v2 separates **what the source actually tells us** from the later send decision.
-For example, `12 minutes ago` is stored as a one-minute interval, while `1 hour ago`
-is stored as a wider hour bucket. If LinkedIn exposes an exact `datetime` attribute,
-that exact timestamp is preserved. Missing or coarse timestamps stay uncertain instead
-of being silently converted to false precision.
+Schema v3 separates **what the source tells us** from **whether a newly discovered job is safe to notify**. `12 minutes ago` is stored as a narrow interval, while `1 hour ago` remains a wider hour bucket. Exact `datetime` values stay exact; missing/coarse values stay uncertain.
 
-This update does **not** yet replace the production send gate. It prepares the data and
-source state needed for the next step: `new-to-us + max_age + baseline` freshness logic
-that tolerates source indexing delay without replaying stale jobs.
+The send decision is now based on **new-to-us + max age + source baseline**, not `published_at > last_run`. This avoids losing jobs that become visible after indexing delay.
 
-Existing successful sources are migrated as already baselined. A source added after
-schema v2 stays unbaselined until the runtime explicitly completes its first no-send
-baseline, preventing a new-source bootstrap flood.
+Rules:
+
+- A source's first successful fetch is always a no-send baseline.
+- Fresh timestamp evidence is eligible to send.
+- Explicitly old timestamp evidence is stored as `expired`.
+- LinkedIn may use its bounded `f_TPR` source window as a fallback when a card omits visible time, but only if the previous successful poll is recent.
+- WUZZUF may use recent observation as a fallback because its current cards do not expose reliable posting timestamps.
+- If the previous successful poll is older than the source's max-age budget, the fallback is disabled and uncertain jobs are stored but not sent.
+- Source success is advanced only after fetched jobs have been persisted.
+
+Per-job `freshness_status` values include `FRESH`, `TOO_OLD`, `UNCERTAIN`, `BASELINE`, and `LEGACY`, with a `freshness_reason` for audit/debugging.
 
 ## LinkedIn Freshness Rules
 
@@ -260,6 +262,16 @@ sortBy=DD
 ```
 
 This means the bot asks for jobs from the last hour and requests newest-first ordering. The workflow runs every 15 minutes, so this one-hour window gives a safety overlap if GitHub Actions starts late. SQLite deduplication prevents repeated sending of the same job.
+
+Freshness/runtime environment overrides:
+
+```text
+LINKEDIN_FRESHNESS_SECONDS=3600
+WUZZUF_OBSERVATION_MAX_AGE_MINUTES=60
+PENDING_SEND_MAX_AGE_MINUTES=60
+```
+
+These are safety budgets, not promises that a source publishes/indexes every job instantly.
 
 Local defensive filters also skip LinkedIn cards that visibly look stale or closed, such as:
 

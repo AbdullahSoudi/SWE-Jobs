@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from models import Job
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -66,6 +66,8 @@ class StoredJob:
     published_at_est: str
     published_precision: str
     time_semantics: str
+    freshness_status: str
+    freshness_reason: str
     first_seen_at: str
     last_seen_at: str
 
@@ -148,6 +150,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             published_at_est TEXT DEFAULT '',
             published_precision TEXT NOT NULL DEFAULT 'NONE',
             time_semantics TEXT NOT NULL DEFAULT 'UNKNOWN',
+            freshness_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+            freshness_reason TEXT DEFAULT '',
             first_seen_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL
         );
@@ -215,6 +219,8 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         "published_at_est TEXT DEFAULT ''",
         "published_precision TEXT NOT NULL DEFAULT 'NONE'",
         "time_semantics TEXT NOT NULL DEFAULT 'UNKNOWN'",
+        "freshness_status TEXT NOT NULL DEFAULT 'UNKNOWN'",
+        "freshness_reason TEXT DEFAULT ''",
     ):
         _ensure_column(conn, "jobs", definition)
 
@@ -234,6 +240,21 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
             SET last_success_at = COALESCE(last_success_at, last_run_at, updated_at),
                 baselined_at = COALESCE(baselined_at, last_run_at, updated_at)
             WHERE status = 'ok'
+            """
+        )
+
+    if previous_version < 3:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET freshness_status = CASE
+                    WHEN freshness_status = 'UNKNOWN' THEN 'LEGACY'
+                    ELSE freshness_status
+                END,
+                freshness_reason = CASE
+                    WHEN freshness_reason = '' THEN 'pre_v3_record'
+                    ELSE freshness_reason
+                END
             """
         )
 
@@ -432,9 +453,9 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             salary, job_type, tags_json, is_remote, original_source,
             content_hash, send_status, published_at_raw, published_at_earliest,
             published_at_latest, published_at_est, published_precision, time_semantics,
-            first_seen_at, last_seen_at
+            freshness_status, freshness_reason, first_seen_at, last_seen_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 'UNKNOWN', '', ?, ?)
         """,
         (
             job.source,
@@ -482,7 +503,7 @@ def get_jobs_for_sending(conn: sqlite3.Connection, limit: int = 100) -> list[Sto
         """
         SELECT * FROM jobs
         WHERE send_status IN ('pending', 'retry', 'partial')
-        ORDER BY first_seen_at ASC, id ASC
+        ORDER BY first_seen_at DESC, id DESC
         LIMIT ?
         """,
         (limit,),
@@ -531,6 +552,54 @@ def set_job_send_status(conn: sqlite3.Connection, job_id: int, status: str) -> N
     if status not in allowed:
         raise ValueError(f"Invalid send status: {status}")
     conn.execute("UPDATE jobs SET send_status = ? WHERE id = ?", (status, job_id))
+
+
+def set_job_freshness_state(
+    conn: sqlite3.Connection,
+    job_id: int,
+    status: str,
+    reason: str = "",
+) -> None:
+    """Persist the freshness gate result for one job."""
+    allowed = {"UNKNOWN", "LEGACY", "BASELINE", "FRESH", "TOO_OLD", "UNCERTAIN"}
+    normalized = (status or "UNKNOWN").upper()
+    if normalized not in allowed:
+        raise ValueError(f"Invalid freshness status: {status}")
+    conn.execute(
+        "UPDATE jobs SET freshness_status = ?, freshness_reason = ? WHERE id = ?",
+        (normalized, reason or "", job_id),
+    )
+
+
+def expire_stale_unsent_jobs(
+    conn: sqlite3.Connection,
+    max_age_minutes: int,
+    reference_time: datetime | None = None,
+) -> int:
+    """Expire unsent/retry work that has waited beyond the live-feed budget."""
+    if max_age_minutes <= 0:
+        raise ValueError("max_age_minutes must be greater than zero")
+
+    now = reference_time or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    else:
+        now = now.astimezone(UTC)
+
+    cutoff = (now - timedelta(minutes=max_age_minutes)).replace(microsecond=0)
+    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+    cur = conn.execute(
+        """
+        UPDATE jobs
+        SET send_status = 'expired',
+            freshness_status = 'TOO_OLD',
+            freshness_reason = 'send_queue_deadline_exceeded'
+        WHERE send_status IN ('pending', 'retry', 'partial')
+          AND first_seen_at < ?
+        """,
+        (cutoff_iso,),
+    )
+    return int(cur.rowcount)
 
 
 def update_source_run(
@@ -644,6 +713,8 @@ def _row_to_stored_job(row: sqlite3.Row) -> StoredJob:
         published_at_est=row["published_at_est"] or "",
         published_precision=row["published_precision"] or "NONE",
         time_semantics=row["time_semantics"] or "UNKNOWN",
+        freshness_status=row["freshness_status"] or "UNKNOWN",
+        freshness_reason=row["freshness_reason"] or "",
         first_seen_at=row["first_seen_at"],
         last_seen_at=row["last_seen_at"],
     )

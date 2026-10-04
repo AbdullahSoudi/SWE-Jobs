@@ -8,20 +8,48 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main
-from db import connect, count_jobs, get_jobs_for_sending, get_sent_topic_keys
+from db import (
+    connect,
+    count_jobs,
+    get_jobs_for_sending,
+    get_sent_topic_keys,
+    get_source_state,
+    is_source_baselined,
+    mark_source_baselined,
+    update_source_run,
+)
+from freshness import parse_relative_publication
 from models import Job
 
 
 class MainSqliteFlowTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime.now(UTC).replace(microsecond=0)
+
     def make_db_path(self, tmp):
         return os.path.join(tmp, "jobs.db")
 
-    def test_run_bot_persists_then_sends_pending_jobs(self):
-        job = Job(
+    def prime_source(self, db_path, source, minutes_ago=15):
+        previous = self.now - timedelta(minutes=minutes_ago)
+        stamp = previous.isoformat().replace("+00:00", "Z")
+        with connect(db_path) as conn:
+            update_source_run(conn, source, "ok", last_run_at=stamp)
+            mark_source_baselined(conn, source, baselined_at=stamp)
+
+    def test_new_source_first_fetch_is_baseline_then_next_new_job_sends(self):
+        first_job = Job(
             title="Backend Developer",
             company="Acme",
             location="Cairo, Egypt",
-            url="https://wuzzuf.net/jobs/p/backend",
+            url="https://wuzzuf.net/jobs/p/backend-1",
+            source="wuzzuf",
+            tags=["Python"],
+        )
+        second_job = Job(
+            title="Backend Developer II",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://wuzzuf.net/jobs/p/backend-2",
             source="wuzzuf",
             tags=["Python"],
         )
@@ -31,28 +59,45 @@ class MainSqliteFlowTests(unittest.TestCase):
             sent.append((job_obj.title, list(topics or [])))
             return {topic: True for topic in topics}
 
-        def fake_router(job_obj):
-            return ["general", "backend"]
-
         with tempfile.TemporaryDirectory() as tmp:
-            summary = main.run_bot(
-                db_path=self.make_db_path(tmp),
-                fetchers=[("WUZZUF", lambda: [job])],
+            db_path = self.make_db_path(tmp)
+            first = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [first_job])],
                 sender=fake_sender,
-                router=fake_router,
+                router=lambda job_obj: ["backend"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now,
             )
-            self.assertEqual(summary.raw_jobs, 1)
-            self.assertEqual(summary.filtered_jobs, 1)
-            self.assertEqual(summary.inserted_jobs, 1)
-            self.assertEqual(summary.topic_send_successes, 2)
-            self.assertEqual(summary.topic_send_failures, 0)
-            self.assertEqual(sent, [("Backend Developer", ["general", "backend"])])
+            self.assertEqual(first.inserted_jobs, 1)
+            self.assertEqual(first.baseline_skipped_jobs, 1)
+            self.assertEqual(first.sources_baselined, 1)
+            self.assertEqual(first.topic_send_successes, 0)
+            self.assertEqual(sent, [])
 
-            with connect(self.make_db_path(tmp)) as conn:
-                self.assertEqual(count_jobs(conn), 1)
-                self.assertEqual(get_jobs_for_sending(conn), [])
+            second = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [first_job, second_job])],
+                sender=fake_sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now + timedelta(minutes=15),
+            )
+            self.assertEqual(second.inserted_jobs, 1)
+            self.assertEqual(second.fresh_new_jobs, 1)
+            self.assertEqual(second.topic_send_successes, 1)
+            self.assertEqual(sent, [("Backend Developer II", ["backend"])])
+
+            with connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT title, send_status, freshness_status FROM jobs ORDER BY id"
+                ).fetchall()
+                self.assertEqual(rows[0]["send_status"], "skipped")
+                self.assertEqual(rows[0]["freshness_status"], "BASELINE")
+                self.assertEqual(rows[1]["send_status"], "sent")
+                self.assertEqual(rows[1]["freshness_status"], "FRESH")
 
     def test_partial_send_retries_only_unsent_topics_without_duplicates(self):
         job = Job(
@@ -78,6 +123,7 @@ class MainSqliteFlowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
             summary1 = main.run_bot(
                 db_path=db_path,
                 fetchers=[("WUZZUF", lambda: [job])],
@@ -85,6 +131,7 @@ class MainSqliteFlowTests(unittest.TestCase):
                 router=fake_router,
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now,
             )
             self.assertEqual(summary1.topic_send_successes, 1)
             self.assertEqual(summary1.topic_send_failures, 1)
@@ -103,6 +150,7 @@ class MainSqliteFlowTests(unittest.TestCase):
                 router=fake_router,
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now + timedelta(minutes=15),
             )
             self.assertEqual(summary2.refreshed_jobs, 1)
             self.assertEqual(summary2.topic_send_successes, 1)
@@ -125,19 +173,23 @@ class MainSqliteFlowTests(unittest.TestCase):
         sent = []
 
         with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
             summary = main.run_bot(
-                db_path=self.make_db_path(tmp),
+                db_path=db_path,
                 fetchers=[("LinkedIn", lambda: [job])],
                 sender=lambda job_obj, topics: sent.append(topics) or {topic: True for topic in topics},
                 router=lambda job_obj: ["linkedin_all"],
                 cleanup_func=lambda: None,
                 seed_mode=True,
+                reference_time=self.now,
             )
             self.assertEqual(summary.inserted_jobs, 1)
-            self.assertEqual(summary.skipped_jobs, 1)
+            self.assertEqual(summary.baseline_skipped_jobs, 1)
+            self.assertEqual(summary.sources_baselined, 1)
             self.assertEqual(sent, [])
-            with connect(self.make_db_path(tmp)) as conn:
+            with connect(db_path) as conn:
                 self.assertEqual(get_jobs_for_sending(conn), [])
+                self.assertTrue(is_source_baselined(conn, "linkedin"))
 
     def test_run_expires_old_legacy_backlog_before_sending(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,9 +203,8 @@ class MainSqliteFlowTests(unittest.TestCase):
             )
             with connect(db_path) as conn:
                 main.upsert_jobs(conn, [old_job])
-                # upsert_jobs returns counts; fetch the inserted row id directly.
                 row = conn.execute("SELECT id FROM jobs WHERE url = ?", (old_job.url,)).fetchone()
-                old_ts = (datetime.now(UTC) - timedelta(hours=3)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                old_ts = (self.now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
                 conn.execute("UPDATE jobs SET first_seen_at = ? WHERE id = ?", (old_ts, row["id"]))
 
             sent = []
@@ -164,16 +215,57 @@ class MainSqliteFlowTests(unittest.TestCase):
                 router=lambda job_obj: ["backend"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now,
             )
 
             self.assertEqual(summary.expired_backlog_jobs, 1)
             self.assertEqual(summary.pending_processed, 0)
             self.assertEqual(sent, [])
             with connect(db_path) as conn:
-                status = conn.execute("SELECT send_status FROM jobs WHERE url = ?", (old_job.url,)).fetchone()["send_status"]
+                status = conn.execute(
+                    "SELECT send_status FROM jobs WHERE url = ?", (old_job.url,)
+                ).fetchone()["send_status"]
                 self.assertEqual(status, "expired")
 
-    def test_failed_source_does_not_stop_other_sources(self):
+    def test_live_queue_deadline_expires_retry_before_it_can_send_late(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            job = Job(
+                title="QA Engineer",
+                company="Acme",
+                location="Cairo, Egypt",
+                url="https://wuzzuf.net/jobs/p/qa-old",
+                source="wuzzuf",
+            )
+            with connect(db_path) as conn:
+                job_id, _ = main.upsert_job(conn, job)
+                old_ts = (self.now - timedelta(minutes=75)).isoformat().replace("+00:00", "Z")
+                conn.execute(
+                    "UPDATE jobs SET first_seen_at = ?, send_status = 'retry' WHERE id = ?",
+                    (old_ts, job_id),
+                )
+
+            sent = []
+            summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[],
+                sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
+                router=lambda job_obj: ["qa"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(summary.expired_queue_jobs, 1)
+            self.assertEqual(summary.pending_processed, 0)
+            self.assertEqual(sent, [])
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status, freshness_reason FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+                self.assertEqual(row["send_status"], "expired")
+                self.assertEqual(row["freshness_reason"], "send_queue_deadline_exceeded")
+
+    def test_failed_source_does_not_stop_other_sources_or_baseline_failed_source(self):
         good_job = Job(
             title="Frontend Developer",
             company="Acme",
@@ -188,38 +280,47 @@ class MainSqliteFlowTests(unittest.TestCase):
             raise RuntimeError("source down")
 
         with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
             summary = main.run_bot(
-                db_path=self.make_db_path(tmp),
+                db_path=db_path,
                 fetchers=[("Broken", bad_fetcher), ("WUZZUF", lambda: [good_job])],
                 sender=lambda job_obj, topics: {topic: True for topic in topics},
                 router=lambda job_obj: ["general"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now,
             )
             self.assertEqual(summary.raw_jobs, 1)
             self.assertEqual(summary.inserted_jobs, 1)
             self.assertEqual(summary.topic_send_successes, 1)
+            with connect(db_path) as conn:
+                self.assertFalse(is_source_baselined(conn, "broken"))
+                self.assertEqual(get_source_state(conn, "broken")["status"], "failed")
 
     def test_jobs_with_no_topics_are_skipped_not_retried_forever(self):
         job = Job(
             title="Backend Developer",
             company="Acme",
             location="Cairo, Egypt",
-            url="https://wuzzuf.net/jobs/p/backend",
+            url="https://wuzzuf.net/jobs/p/backend-no-topic",
             source="wuzzuf",
         )
 
         with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
             summary = main.run_bot(
-                db_path=self.make_db_path(tmp),
+                db_path=db_path,
                 fetchers=[("WUZZUF", lambda: [job])],
                 sender=lambda job_obj, topics: {topic: True for topic in topics},
                 router=lambda job_obj: [],
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now,
             )
             self.assertEqual(summary.skipped_jobs, 1)
-            with connect(self.make_db_path(tmp)) as conn:
+            with connect(db_path) as conn:
                 self.assertEqual(get_jobs_for_sending(conn), [])
 
     def test_unclassified_linkedin_job_is_kept_for_linkedin_all_topic(self):
@@ -235,18 +336,93 @@ class MainSqliteFlowTests(unittest.TestCase):
         sent = []
 
         with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "linkedin")
             summary = main.run_bot(
-                db_path=self.make_db_path(tmp),
+                db_path=db_path,
                 fetchers=[("LinkedIn", lambda: [job])],
                 sender=lambda job_obj, topics: sent.append((job_obj.title, list(topics))) or {topic: True for topic in topics},
                 router=lambda job_obj: ["linkedin_all"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now,
             )
             self.assertEqual(summary.filtered_jobs, 1)
             self.assertEqual(summary.inserted_jobs, 1)
+            self.assertEqual(summary.fresh_new_jobs, 1)
             self.assertEqual(summary.topic_send_successes, 1)
             self.assertEqual(sent, [("People Operations Coordinator", ["linkedin_all"])])
+
+    def test_old_linkedin_job_is_stored_but_never_sent(self):
+        evidence = parse_relative_publication("2 hours ago", fetched_at=self.now)
+        job = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url="https://www.linkedin.com/jobs/view/9999999999",
+            source="linkedin",
+            published_at_raw=evidence.raw,
+            published_at_earliest=evidence.earliest,
+            published_at_latest=evidence.latest,
+            published_at_est=evidence.estimate,
+            published_precision=evidence.precision,
+            time_semantics=evidence.semantics,
+        )
+        sent = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "linkedin")
+            summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("LinkedIn", lambda: [job])],
+                sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
+                router=lambda job_obj: ["linkedin_all"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(summary.inserted_jobs, 1)
+            self.assertEqual(summary.fresh_new_jobs, 0)
+            self.assertEqual(summary.expired_new_jobs, 1)
+            self.assertEqual(sent, [])
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status, freshness_status FROM jobs WHERE url = ?", (job.url,)
+                ).fetchone()
+                self.assertEqual(row["send_status"], "expired")
+                self.assertEqual(row["freshness_status"], "TOO_OLD")
+
+    def test_observation_fallback_is_disabled_after_long_source_gap(self):
+        job = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://wuzzuf.net/jobs/p/after-gap",
+            source="wuzzuf",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf", minutes_ago=90)
+            summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [job])],
+                sender=lambda job_obj, topics: {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(summary.inserted_jobs, 1)
+            self.assertEqual(summary.uncertain_new_jobs, 1)
+            self.assertEqual(summary.topic_send_successes, 0)
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status, freshness_reason FROM jobs WHERE url = ?", (job.url,)
+                ).fetchone()
+                self.assertEqual(row["send_status"], "expired")
+                self.assertEqual(row["freshness_reason"], "coverage_gap_too_large")
 
     def test_unclassified_non_linkedin_job_is_still_filtered_out(self):
         job = Job(
@@ -260,18 +436,20 @@ class MainSqliteFlowTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
             summary = main.run_bot(
-                db_path=self.make_db_path(tmp),
+                db_path=db_path,
                 fetchers=[("WUZZUF", lambda: [job])],
                 sender=lambda job_obj, topics: {topic: True for topic in topics},
                 router=lambda job_obj: ["general"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
+                reference_time=self.now,
             )
             self.assertEqual(summary.filtered_jobs, 0)
             self.assertEqual(summary.inserted_jobs, 0)
             self.assertEqual(summary.topic_send_successes, 0)
-            with connect(self.make_db_path(tmp)) as conn:
+            with connect(db_path) as conn:
                 self.assertEqual(count_jobs(conn), 0)
 
 

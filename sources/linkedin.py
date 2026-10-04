@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+from config import LINKEDIN_FRESHNESS_SECONDS
 from freshness import PublicationEvidence, TOO_OLD, freshness_decision, parse_iso_publication, parse_relative_publication
 from models import Job
 
@@ -36,7 +37,7 @@ BASE_URL = "https://www.linkedin.com"
 # We intentionally use a rolling 1-hour freshness window while the workflow runs
 # every ~15 minutes. Deduplication in SQLite removes overlap, and the wider
 # window reduces the chance of missing jobs when GitHub Actions starts late.
-DEFAULT_FRESHNESS_SECONDS = int(os.getenv("LINKEDIN_FRESHNESS_SECONDS", "3600"))
+DEFAULT_FRESHNESS_SECONDS = LINKEDIN_FRESHNESS_SECONDS
 LINKEDIN_DEFAULT_PARAMS = {"f_TPR": f"r{DEFAULT_FRESHNESS_SECONDS}", "sortBy": "DD"}
 
 

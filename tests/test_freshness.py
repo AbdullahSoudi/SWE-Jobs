@@ -2,9 +2,13 @@ import unittest
 from datetime import UTC, datetime
 
 from freshness import (
+    BASELINE,
+    FALLBACK_RECENT_OBSERVATION,
+    FALLBACK_SOURCE_WINDOW,
     FRESH,
     TOO_OLD,
     UNCERTAIN,
+    evaluate_new_posting,
     freshness_decision,
     parse_iso_publication,
     parse_relative_publication,
@@ -48,6 +52,57 @@ class FreshnessEvidenceTests(unittest.TestCase):
         evidence = parse_relative_publication("5 minutes ago", fetched_at=self.now)
         with self.assertRaises(ValueError):
             freshness_decision(evidence, 0, reference_time=self.now)
+
+    def test_first_fetch_is_always_baseline_even_with_fresh_timestamp(self):
+        evidence = parse_relative_publication("5 minutes ago", fetched_at=self.now)
+        result = evaluate_new_posting(
+            evidence,
+            source_was_baselined=False,
+            previous_success_at=None,
+            max_age_seconds=3600,
+            uncertain_fallback=FALLBACK_SOURCE_WINDOW,
+            reference_time=self.now,
+        )
+        self.assertEqual(result.status, BASELINE)
+        self.assertFalse(result.send_eligible)
+
+    def test_fresh_timestamp_is_send_eligible_after_baseline(self):
+        evidence = parse_relative_publication("5 minutes ago", fetched_at=self.now)
+        result = evaluate_new_posting(
+            evidence,
+            source_was_baselined=True,
+            previous_success_at="2026-10-04T14:45:00Z",
+            max_age_seconds=3600,
+            reference_time=self.now,
+        )
+        self.assertEqual(result.status, FRESH)
+        self.assertTrue(result.send_eligible)
+
+    def test_uncertain_timestamp_can_use_recent_observation_fallback(self):
+        result = evaluate_new_posting(
+            parse_relative_publication("", fetched_at=self.now),
+            source_was_baselined=True,
+            previous_success_at="2026-10-04T14:45:00Z",
+            max_age_seconds=3600,
+            uncertain_fallback=FALLBACK_RECENT_OBSERVATION,
+            reference_time=self.now,
+        )
+        self.assertEqual(result.status, FRESH)
+        self.assertEqual(result.reason, "recent_observation_after_success")
+        self.assertTrue(result.send_eligible)
+
+    def test_uncertain_fallback_is_rejected_after_coverage_gap(self):
+        result = evaluate_new_posting(
+            parse_relative_publication("", fetched_at=self.now),
+            source_was_baselined=True,
+            previous_success_at="2026-10-04T13:00:00Z",
+            max_age_seconds=3600,
+            uncertain_fallback=FALLBACK_SOURCE_WINDOW,
+            reference_time=self.now,
+        )
+        self.assertEqual(result.status, UNCERTAIN)
+        self.assertEqual(result.reason, "coverage_gap_too_large")
+        self.assertFalse(result.send_eligible)
 
 
 if __name__ == "__main__":

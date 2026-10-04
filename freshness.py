@@ -1,8 +1,8 @@
-"""Freshness evidence helpers for job postings.
+"""Freshness evidence and send-gating helpers for job postings.
 
-The bot must not pretend that coarse timestamps are exact.  This module turns
-public posting-time signals (for example, "12 minutes ago" or an ISO datetime)
-into an interval that preserves the source's uncertainty.
+The bot must not pretend that coarse timestamps are exact. This module turns
+public posting-time signals into intervals, then combines that evidence with
+source state so newly discovered jobs can be sent without replaying stale ones.
 """
 
 from __future__ import annotations
@@ -21,6 +21,11 @@ PRECISION_NONE = "NONE"
 FRESH = "FRESH"
 TOO_OLD = "TOO_OLD"
 UNCERTAIN = "UNCERTAIN"
+BASELINE = "BASELINE"
+
+FALLBACK_NONE = "NONE"
+FALLBACK_RECENT_OBSERVATION = "RECENT_OBSERVATION"
+FALLBACK_SOURCE_WINDOW = "SOURCE_WINDOW"
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,15 @@ class PublicationEvidence:
     estimate: str = ""
     precision: str = PRECISION_NONE
     semantics: str = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class FreshnessGateDecision:
+    """Decision for one newly inserted posting."""
+
+    status: str
+    reason: str
+    send_eligible: bool
 
 
 def utc_now() -> datetime:
@@ -53,7 +67,7 @@ def parse_iso_publication(value: str, raw_text: str = "") -> PublicationEvidence
     if not text:
         return PublicationEvidence(raw=raw_text or "")
 
-    # A date-only signal represents the whole UTC day.  Source-local timezone
+    # A date-only signal represents the whole UTC day. Source-local timezone
     # handling can be layered on later once an adapter knows its exact semantics.
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
         day = datetime.fromisoformat(text).replace(tzinfo=UTC)
@@ -142,7 +156,7 @@ def freshness_decision(
     max_age_seconds: int,
     reference_time: datetime | None = None,
 ) -> str:
-    """Classify evidence without turning uncertain timestamps into false precision.
+    """Classify publication evidence without inventing false precision.
 
     TOO_OLD: even the newest possible publication time is older than max_age.
     FRESH:   even the oldest possible publication time is inside max_age.
@@ -163,3 +177,59 @@ def freshness_decision(
     if earliest >= cutoff:
         return FRESH
     return UNCERTAIN
+
+
+def evaluate_new_posting(
+    evidence: PublicationEvidence,
+    *,
+    source_was_baselined: bool,
+    previous_success_at: str | None,
+    max_age_seconds: int,
+    uncertain_fallback: str = FALLBACK_NONE,
+    reference_time: datetime | None = None,
+) -> FreshnessGateDecision:
+    """Return the send gate for one newly discovered posting.
+
+    A source's first successful fetch is always a no-send baseline. After that,
+    exact/relative timestamp evidence is authoritative. When timestamp evidence
+    is uncertain, selected sources may use a recent successful observation as a
+    conservative fallback. A long coverage gap disables that fallback.
+    """
+    if max_age_seconds <= 0:
+        raise ValueError("max_age_seconds must be greater than zero")
+
+    if not source_was_baselined:
+        return FreshnessGateDecision(BASELINE, "initial_source_baseline", False)
+
+    now = ensure_utc(reference_time or utc_now())
+    evidence_decision = freshness_decision(
+        evidence,
+        max_age_seconds=max_age_seconds,
+        reference_time=now,
+    )
+
+    if evidence_decision == FRESH:
+        return FreshnessGateDecision(FRESH, "publication_time_fresh", True)
+    if evidence_decision == TOO_OLD:
+        return FreshnessGateDecision(TOO_OLD, "publication_time_too_old", False)
+
+    fallback = (uncertain_fallback or FALLBACK_NONE).upper()
+    if fallback == FALLBACK_NONE:
+        return FreshnessGateDecision(UNCERTAIN, "insufficient_time_evidence", False)
+
+    previous = parse_utc_iso(previous_success_at or "")
+    if previous is None:
+        return FreshnessGateDecision(UNCERTAIN, "no_previous_success", False)
+
+    gap_seconds = (now - previous).total_seconds()
+    if gap_seconds < 0:
+        return FreshnessGateDecision(UNCERTAIN, "previous_success_in_future", False)
+    if gap_seconds > max_age_seconds:
+        return FreshnessGateDecision(UNCERTAIN, "coverage_gap_too_large", False)
+
+    if fallback == FALLBACK_SOURCE_WINDOW:
+        return FreshnessGateDecision(FRESH, "source_window_recent_observation", True)
+    if fallback == FALLBACK_RECENT_OBSERVATION:
+        return FreshnessGateDecision(FRESH, "recent_observation_after_success", True)
+
+    raise ValueError(f"Unsupported uncertain_fallback: {uncertain_fallback}")

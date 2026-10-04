@@ -192,7 +192,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class FreshnessSchemaV2Tests(unittest.TestCase):
+class FreshnessSchemaV3Tests(unittest.TestCase):
     def test_publication_evidence_round_trips_through_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "jobs.db")
@@ -250,7 +250,7 @@ class FreshnessSchemaV2Tests(unittest.TestCase):
                 row = conn.execute("SELECT * FROM source_runs WHERE source = 'linkedin'").fetchone()
                 self.assertEqual(row["last_success_at"], "2026-10-04T12:00:00Z")
                 self.assertEqual(row["baselined_at"], "2026-10-04T12:00:00Z")
-                self.assertEqual(get_metadata(conn, "schema_version"), "2")
+                self.assertEqual(get_metadata(conn, "schema_version"), "3")
 
     def test_new_source_does_not_auto_baseline_across_reconnects(self):
         from db import is_source_baselined, mark_source_baselined
