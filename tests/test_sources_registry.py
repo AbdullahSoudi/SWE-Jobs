@@ -33,6 +33,15 @@ class SourceRegistryTests(unittest.TestCase):
             ],
         )
 
+
+    def test_poll_interval_registry_keeps_core_hot_and_ats_adaptive(self):
+        intervals = self.registry.SOURCE_POLL_INTERVAL_MINUTES
+        self.assertEqual(intervals["wuzzuf"], 15)
+        self.assertEqual(intervals["linkedin"], 15)
+        self.assertEqual(intervals["linkedin_saudi_v2"], 15)
+        self.assertEqual(intervals["ats_greenhouse_hala"], 30)
+        self.assertEqual(intervals["ats_greenhouse_minio"], 60)
+
     def test_no_legacy_sources_are_registered(self):
         names = {name.lower() for name, _ in self.registry.ALL_FETCHERS}
         disabled_sources = {

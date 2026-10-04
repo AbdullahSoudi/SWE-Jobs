@@ -28,6 +28,7 @@ class ATSCompany:
     country: str = "SA"
     careers_url: str = ""
     enabled: bool = True
+    poll_interval_minutes: int = 60
 
     @property
     def source_name(self) -> str:
@@ -67,6 +68,7 @@ def load_ats_companies(path: str | Path = REGISTRY_PATH) -> list[ATSCompany]:
             country=str(row.get("country", "SA")).strip().upper(),
             careers_url=str(row.get("careers_url", "")).strip(),
             enabled=bool(row.get("enabled", True)),
+            poll_interval_minutes=int(row.get("poll_interval_minutes", 60)),
         )
         if not company.enabled:
             continue
@@ -76,6 +78,8 @@ def load_ats_companies(path: str | Path = REGISTRY_PATH) -> list[ATSCompany]:
             raise ValueError(f"Unsupported ATS '{company.ats}' for {company.company}")
         if company.country != "SA":
             raise ValueError(f"Saudi registry entry {company.company} must use country=SA")
+        if company.poll_interval_minutes < 15:
+            raise ValueError(f"ATS registry poll interval for {company.company} must be at least 15 minutes")
         if company.key in seen_keys:
             raise ValueError(f"Duplicate ATS registry key: {company.key}")
         seen_keys.add(company.key)
@@ -100,3 +104,11 @@ def _make_fetcher(company: ATSCompany) -> Callable[[], list[Job]]:
 def build_ats_fetchers(path: str | Path = REGISTRY_PATH) -> list[tuple[str, Callable[[], list[Job]]]]:
     """Build source-registry tuples compatible with sources.ALL_FETCHERS."""
     return [(company.source_name, _make_fetcher(company)) for company in load_ats_companies(path)]
+
+
+def build_ats_poll_intervals(path: str | Path = REGISTRY_PATH) -> dict[str, int]:
+    """Return persisted source-key polling intervals for enabled ATS tenants."""
+    return {
+        company.source_key: company.poll_interval_minutes
+        for company in load_ats_companies(path)
+    }

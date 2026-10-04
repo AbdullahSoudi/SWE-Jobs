@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from company_registry import build_ats_fetchers, load_ats_companies
+from company_registry import build_ats_fetchers, build_ats_poll_intervals, load_ats_companies
 
 
 class CompanyRegistryTests(unittest.TestCase):
@@ -16,6 +16,21 @@ class CompanyRegistryTests(unittest.TestCase):
         self.assertEqual({c.ats for c in companies}, {"greenhouse", "lever", "ashby"})
         self.assertTrue(all(c.country == "SA" for c in companies))
         self.assertTrue(all(c.source_key.startswith("ats_") for c in companies))
+
+
+    def test_registry_exposes_safe_poll_intervals(self):
+        companies = load_ats_companies()
+        intervals = {c.key: c.poll_interval_minutes for c in companies}
+        self.assertEqual(intervals, {
+            "hala": 30,
+            "minio": 60,
+            "soum": 30,
+            "sarjai": 60,
+            "echelon": 60,
+        })
+        source_intervals = build_ats_poll_intervals()
+        self.assertEqual(source_intervals["ats_greenhouse_hala"], 30)
+        self.assertEqual(source_intervals["ats_ashby_echelon"], 60)
 
     def test_fetchers_have_stable_source_names(self):
         fetchers = build_ats_fetchers()

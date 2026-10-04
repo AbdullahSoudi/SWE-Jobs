@@ -6,7 +6,8 @@
     "tenant": "hala",
     "country": "SA",
     "careers_url": "https://job-boards.greenhouse.io/hala",
-    "enabled": true
+    "enabled": true,
+    "poll_interval_minutes": 30
   },
   {
     "key": "minio",
@@ -15,7 +16,8 @@
     "tenant": "minio",
     "country": "SA",
     "careers_url": "https://job-boards.greenhouse.io/minio",
-    "enabled": true
+    "enabled": true,
+    "poll_interval_minutes": 60
   },
   {
     "key": "soum",
@@ -24,7 +26,8 @@
     "tenant": "soum",
     "country": "SA",
     "careers_url": "https://jobs.lever.co/soum",
-    "enabled": true
+    "enabled": true,
+    "poll_interval_minutes": 30
   },
   {
     "key": "sarjai",
@@ -33,7 +36,8 @@
     "tenant": "sarjai",
     "country": "SA",
     "careers_url": "https://jobs.ashbyhq.com/sarjai",
-    "enabled": true
+    "enabled": true,
+    "poll_interval_minutes": 60
   },
   {
     "key": "echelon",
@@ -42,6 +46,7 @@
     "tenant": "echeloncareers",
     "country": "SA",
     "careers_url": "https://jobs.ashbyhq.com/echeloncareers",
-    "enabled": true
+    "enabled": true,
+    "poll_interval_minutes": 60
   }
 ]

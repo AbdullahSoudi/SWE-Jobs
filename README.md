@@ -12,7 +12,8 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
-- **Per-source run history:** fetch counts, freshness outcomes, failures, duration, shadow yield, and coverage gaps are stored for later source scoring.
+- **Per-source run history:** fetch counts, freshness outcomes, failures, duration, shadow yield, coverage gaps, and health status are stored for later source scoring.
+- **Per-source scheduling:** the workflow still wakes every 15 minutes, but individual ATS tenants persist `next_poll_at` and can run every 30–60 minutes without wasting requests.
 - **SQLite state:** jobs, source state, freshness evidence, delivery state, and delivery attempts live in `jobs.db`.
 - **Durable Telegram outbox:** delivery state is written before the network call.
 - **Measured bilingual classifier:** English + Arabic tech-title classification drives both broad LinkedIn filtering and the single primary Telegram topic.
@@ -29,11 +30,11 @@ Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core f
 | WUZZUF | Production | Public category/search cards; mainly Egypt |
 | LinkedIn | Production | Existing public guest search strategy |
 | LinkedIn Saudi V2 | Shadow | Saudi `geoId=100459316`, broad country search + ERP/business-systems gap fillers |
-| HALA | Shadow ATS | Greenhouse public job board |
-| MinIO | Shadow ATS | Greenhouse public job board, Saudi rows only |
-| SOUM | Shadow ATS | Lever public postings API |
-| Sarj.ai | Shadow ATS | Ashby public job posting API |
-| Echelon | Shadow ATS | Ashby public job posting API |
+| HALA | Shadow ATS | Greenhouse public job board · 30 min poll |
+| MinIO | Shadow ATS | Greenhouse public job board, Saudi rows only · 60 min poll |
+| SOUM | Shadow ATS | Lever public postings API · 30 min poll |
+| Sarj.ai | Shadow ATS | Ashby public job posting API · 60 min poll |
+| Echelon | Shadow ATS | Ashby public job posting API · 60 min poll |
 | Legacy aggregators | Disabled | Not registered at runtime |
 
 All ATS feeds are shadow by default because their generated source keys are not in `PRODUCTION_SOURCE_KEYS`. Their first successful fetch establishes a no-send baseline, then later newly observed jobs can be measured without Telegram delivery.
@@ -54,6 +55,22 @@ companies/saudi_ats.json
 `company_registry.py` validates the registry and builds one source fetcher per employer. This gives each company its own source health/freshness/observation metrics instead of hiding all ATS traffic behind one aggregate source.
 
 The adapters live in `sources/ats.py` and use public job-board read endpoints only. Greenhouse and Lever are treated as snapshot feeds when they do not expose a reliable publication time. Ashby preserves its `publishedAt` timestamp. Global company boards are filtered to explicit Saudi locations before the tech classifier runs, so a global remote role is not accepted merely because the employer is in the Saudi registry.
+
+### Source scheduling and health
+
+GitHub Actions still starts the bot every 15 minutes, but Update 10 no longer fetches every source on every workflow run. `source_runs` persists `poll_interval_minutes`, `next_poll_at`, `health_status`, and `last_nonempty_at`. Core feeds (`linkedin`, `wuzzuf`, and the Saudi V2 shadow comparison) remain on a 15-minute cadence. ATS companies use the interval declared in `companies/saudi_ats.json`; the initial registry uses 30–60 minute polls.
+
+A successful source schedules its next normal poll at its configured interval. A failed source retries on the next 15-minute workflow cycle even when its normal cadence is slower. Sources that are not due are skipped without blocking the Telegram delivery queue.
+
+Health intentionally distinguishes a quiet ATS tenant from a broken integration:
+
+- `HEALTHY` — successful fetch with results.
+- `IDLE` — successful ATS fetch with zero Saudi postings; this is not treated as a failure.
+- `QUIET` — a non-ATS source has a short run of successful empty results.
+- `DEGRADED` — transport/schema failure, or repeated empty runs on a core/search source.
+- `UNHEALTHY` — three consecutive fetch failures.
+
+If two or more tenants on the same ATS adapter all fail in the same bot run, an adapter-level outage warning is logged so a Greenhouse/Ashby parser change is not mistaken for multiple unrelated employer failures.
 
 ### Saudi LinkedIn V2 shadow experiment
 
@@ -302,7 +319,7 @@ save jobs.db to data branch
 
 ## Source Analytics (Shadow Evaluation)
 
-Schema v6 records a separate observation whenever a source sees a relevant job.
+Schema v6 introduced source observations; the current SQLite schema is v7 and adds persisted source scheduling/health state.
 This lets the bot compare production LinkedIn with `linkedin_saudi_v2` without
 credit depending on which source happened to be processed first. No historical
 source-discovery order is fabricated; observation analytics starts when v6 is deployed.
@@ -394,6 +411,7 @@ python main.py
 ├── db.py
 ├── freshness.py
 ├── source_analytics.py
+├── source_runtime.py
 ├── company_registry.py
 ├── telegram_sender.py
 ├── cleanup.py
@@ -418,6 +436,7 @@ python main.py
 │   ├── test_readme.py
 │   ├── test_routing.py
 │   ├── test_source_analytics.py
+│   ├── test_source_runtime.py
 │   ├── test_sources_registry.py
 │   ├── test_telegram_sender.py
 │   ├── test_workflow.py

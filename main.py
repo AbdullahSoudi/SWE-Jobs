@@ -31,9 +31,9 @@ from config import (
     SOURCE_FRESHNESS_POLICIES,
 )
 try:
-    from sources import ALL_FETCHERS
+    from sources import ALL_FETCHERS, SOURCE_POLL_INTERVAL_MINUTES
 except ModuleNotFoundError:  # local flat-file test layout
-    from __init__ import ALL_FETCHERS
+    from __init__ import ALL_FETCHERS, SOURCE_POLL_INTERVAL_MINUTES
 from models import Job, is_programming_job, passes_geo_filter
 from classifier import is_tech_job
 from telegram_sender import (
@@ -56,6 +56,13 @@ from freshness import (
     utc_now,
 )
 from source_analytics import build_source_analytics, format_source_analytics
+from source_runtime import (
+    classify_source_health,
+    compute_next_poll_at,
+    detect_ats_adapter_outages,
+    is_source_due,
+    normalize_poll_interval,
+)
 from db import (
     DB_FILE,
     connect,
@@ -122,6 +129,8 @@ class SourceCycleMetrics:
     shadow_eligible_jobs: int = 0
     coverage_gap: bool = False
     shadow_mode: bool = True
+    health_status: str = "UNKNOWN"
+    poll_interval_minutes: int = 15
 
 
 @dataclass
@@ -138,6 +147,8 @@ class RunSummary:
     sources_baselined: int = 0
     source_failures: int = 0
     source_runs_recorded: int = 0
+    sources_skipped_not_due: int = 0
+    ats_adapter_outages: int = 0
     pending_processed: int = 0
     topic_send_successes: int = 0
     topic_send_failures: int = 0
@@ -158,6 +169,30 @@ def _is_seed_mode(seed_mode: bool | None = None) -> bool:
     if seed_mode is not None:
         return seed_mode
     return os.getenv(SEED_MODE_ENV, "").lower() in ("1", "true", "yes")
+
+
+def _poll_interval_for(source_key: str, poll_intervals: dict[str, int]) -> int:
+    return normalize_poll_interval(poll_intervals.get(source_key, 15))
+
+
+def _select_due_fetchers(
+    conn,
+    fetchers: Iterable[Fetcher],
+    poll_intervals: dict[str, int],
+    reference_time: datetime,
+) -> tuple[list[Fetcher], list[str]]:
+    """Split configured fetchers into due and not-yet-due sources."""
+    due: list[Fetcher] = []
+    skipped: list[str] = []
+    for display_name, fetcher in fetchers:
+        source_key = _source_key(display_name)
+        interval = _poll_interval_for(source_key, poll_intervals)
+        state = get_source_state(conn, source_key)
+        if is_source_due(state, now=reference_time, poll_interval_minutes=interval):
+            due.append((display_name, fetcher))
+        else:
+            skipped.append(source_key)
+    return due, skipped
 
 
 def _capture_source_context(conn, fetchers: Iterable[Fetcher]) -> dict[str, SourceContext]:
@@ -596,6 +631,7 @@ def run_bot(
     seed_mode: bool | None = None,
     reference_time: datetime | None = None,
     production_source_keys: set[str] | None = None,
+    source_poll_intervals: dict[str, int] | None = None,
 ) -> RunSummary:
     """Run one bot cycle. Parameters are injectable for tests."""
     start = time.time()
@@ -604,6 +640,9 @@ def run_bot(
     summary = RunSummary(seed_mode=_is_seed_mode(seed_mode))
     fetcher_list = list(fetchers)
     production_keys = set(PRODUCTION_SOURCE_KEYS if production_source_keys is None else production_source_keys)
+    poll_intervals = dict(SOURCE_POLL_INTERVAL_MINUTES)
+    if source_poll_intervals:
+        poll_intervals.update({_source_key(k): int(v) for k, v in source_poll_intervals.items()})
 
     log.info("=" * 60)
     log.info("Programming Jobs Bot - Starting run")
@@ -637,10 +676,17 @@ def run_bot(
                 summary.expired_queue_jobs,
             )
 
-        source_context = _capture_source_context(conn, fetcher_list)
+        due_fetchers, skipped_due = _select_due_fetchers(
+            conn, fetcher_list, poll_intervals, run_reference
+        )
+        summary.sources_skipped_not_due = len(skipped_due)
+        if skipped_due:
+            log.info("Skipping %s sources until next_poll_at: %s", len(skipped_due), ", ".join(skipped_due))
+
+        source_context = _capture_source_context(conn, due_fetchers)
         all_jobs, source_metrics = fetch_all_jobs(
             conn,
-            fetcher_list,
+            due_fetchers,
             run_at=run_at,
         )
         summary.raw_jobs = len(all_jobs)
@@ -679,6 +725,20 @@ def run_bot(
             metrics.coverage_gap = _has_coverage_gap(
                 context.previous_success_at, source_key, run_reference
             )
+            previous_state = get_source_state(conn, source_key)
+            metrics.poll_interval_minutes = _poll_interval_for(source_key, poll_intervals)
+            metrics.health_status = classify_source_health(
+                source_key,
+                status=metrics.status,
+                raw_count=metrics.raw_jobs,
+                previous_state=previous_state,
+                empty_warning_threshold=SOURCE_EMPTY_RUN_WARNING_THRESHOLD,
+            )
+            next_poll_at = compute_next_poll_at(
+                run_at=run_reference,
+                status=metrics.status,
+                poll_interval_minutes=metrics.poll_interval_minutes,
+            )
 
             update_source_run(
                 conn,
@@ -693,6 +753,9 @@ def run_bot(
                 fresh_count=metrics.fresh_new_jobs,
                 shadow_eligible_count=metrics.shadow_eligible_jobs,
                 duration_ms=metrics.duration_ms,
+                poll_interval_minutes=metrics.poll_interval_minutes,
+                next_poll_at=next_poll_at,
+                health_status=metrics.health_status,
             )
             record_source_run_history(
                 conn,
@@ -712,6 +775,7 @@ def run_bot(
                 shadow_eligible_count=metrics.shadow_eligible_jobs,
                 coverage_gap=metrics.coverage_gap,
                 shadow_mode=metrics.shadow_mode,
+                health_status=metrics.health_status,
             )
             summary.source_runs_recorded += 1
 
@@ -725,6 +789,7 @@ def run_bot(
             state = get_source_state(conn, source_key)
             if (
                 state
+                and not source_key.startswith("ats_")
                 and metrics.status == "ok"
                 and int(state["consecutive_empty_runs"] or 0) >= SOURCE_EMPTY_RUN_WARNING_THRESHOLD
             ):
@@ -733,8 +798,17 @@ def run_bot(
                     source_key,
                     state["consecutive_empty_runs"],
                 )
+            if metrics.health_status in {"DEGRADED", "UNHEALTHY"}:
+                log.warning("Source %s health=%s", source_key, metrics.health_status)
             if metrics.coverage_gap:
                 log.warning("Source %s has a freshness coverage gap.", source_key)
+
+        adapter_outages = detect_ats_adapter_outages(
+            {key: metrics.status for key, metrics in source_metrics.items()}
+        )
+        summary.ats_adapter_outages = len(adapter_outages)
+        for adapter in adapter_outages:
+            log.error("ATS adapter-level outage suspected: %s tenants all failed this run.", adapter)
 
         conn.commit()
 
@@ -792,11 +866,14 @@ def run_bot(
 
     elapsed = time.time() - start
     log.info(
-        "Run complete in %.1fs. Total DB jobs: %s | source_runs=%s, source_failures=%s, shadow_eligible=%s",
+        "Run complete in %.1fs. Total DB jobs: %s | source_runs=%s, source_failures=%s, "
+        "skipped_not_due=%s, ats_adapter_outages=%s, shadow_eligible=%s",
         elapsed,
         summary.total_jobs_in_db,
         summary.source_runs_recorded,
         summary.source_failures,
+        summary.sources_skipped_not_due,
+        summary.ats_adapter_outages,
         summary.shadow_eligible_jobs,
     )
     log.info("=" * 60)

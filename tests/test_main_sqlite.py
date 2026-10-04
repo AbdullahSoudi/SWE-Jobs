@@ -867,7 +867,7 @@ class ATSSnapshotShadowFlowTests(unittest.TestCase):
                 router=lambda job_obj: ["backend"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
-                reference_time=now + timedelta(minutes=15),
+                reference_time=now + timedelta(minutes=30),
             )
             self.assertEqual(second.fresh_new_jobs, 1)
             self.assertEqual(second.shadow_eligible_jobs, 1)
