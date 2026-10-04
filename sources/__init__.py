@@ -18,7 +18,6 @@ except ModuleNotFoundError:  # local flat-file test layout
 from company_registry import build_ats_fetchers, build_ats_poll_intervals
 
 CORE_FETCHERS = [
-    ("WUZZUF", fetch_wuzzuf),
     ("LinkedIn", fetch_linkedin),
     ("LinkedIn Saudi V2", fetch_linkedin_saudi_v2),
 ]
@@ -28,7 +27,6 @@ ATS_FETCHERS = build_ats_fetchers()
 ALL_FETCHERS = CORE_FETCHERS + SHADOW_BOARD_FETCHERS + ATS_FETCHERS
 
 SOURCE_POLL_INTERVAL_MINUTES = {
-    "wuzzuf": 15,
     "linkedin": 15,
     "linkedin_saudi_v2": 15,
     "jobzaty": 60,

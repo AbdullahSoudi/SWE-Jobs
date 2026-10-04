@@ -1,6 +1,6 @@
 # Programming Jobs Telegram Bot
 
-Quality-first Telegram bot for **fresh software/tech jobs** from WUZZUF and LinkedIn, with Saudi Arabia now the main expansion focus.
+Quality-first Telegram bot for **fresh software/tech jobs**, with LinkedIn as the current production feed and Saudi Arabia as the main expansion focus.
 
 The product goal is a real-time job feed, not a historical job archive:
 
@@ -8,7 +8,7 @@ The product goal is a real-time job feed, not a historical job archive:
 
 ## Current Design
 
-- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2, a low-rate Jobzaty discovery feed, and an evidence-driven shadow ATS company registry (Greenhouse, Lever, Ashby, Workday).
+- **Sources:** production LinkedIn, plus shadow Saudi LinkedIn V2, a low-rate Jobzaty discovery feed, and an evidence-driven shadow ATS company registry (Greenhouse, Lever, Ashby, Workday). WUZZUF is temporarily paused after repeated production 403 responses.
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
@@ -21,7 +21,7 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Market/source as metadata:** Egypt/Saudi/Remote and the source are shown in the message instead of creating duplicate topic posts.
 - **Evidence-based Saudi eligibility:** explicit Saudi-only/open-to-non-Saudi text is extracted from available job descriptions; silence stays `NOT_SPECIFIED`.
 - **Telegram backpressure:** rate limiting, `retry_after`, bounded transient retries, and ambiguous-timeout protection.
-- **GitHub Actions:** runs every 15 minutes and persists `jobs.db` on the `data` branch.
+- **GitHub Actions:** requests a 15-minute schedule and persists `jobs.db` on the `data` branch. GitHub scheduled runs are best-effort, so coverage-gap metrics remain authoritative.
 
 ## Sources
 
@@ -29,7 +29,7 @@ Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core f
 
 | Source | Status | Notes |
 |---|---|---|
-| WUZZUF | Production | Public category/search cards; mainly Egypt |
+| WUZZUF | Paused | Repeated 403 responses from GitHub-hosted runners; parser retained for future re-evaluation |
 | LinkedIn | Production | Existing public guest search strategy |
 | LinkedIn Saudi V2 | Shadow | Saudi `geoId=100459316`, broad country search + ERP/business-systems gap fillers |
 | Jobzaty Discovery | Shadow · discovery-only | Public Saudi programming/cybersecurity/IT category cards · 60 min poll · never sends |
@@ -39,7 +39,6 @@ Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core f
 | Sarj.ai | Shadow ATS | Ashby public job posting API · 60 min poll |
 | Echelon | Shadow ATS | Ashby public job posting API · 60 min poll |
 | Scale AI | Shadow ATS | Greenhouse; active Saudi engineering hiring · 30 min poll |
-| Canonical | Shadow ATS | Greenhouse; Saudi/Middle East tech roles · 60 min poll |
 | Incorta | Shadow ATS | Lever; Riyadh data/BI roles · 60 min poll |
 | UiPath | Shadow ATS | Ashby; Riyadh automation/solution engineering · 60 min poll |
 | ElevenLabs | Shadow ATS | Ashby; Saudi AI/engineering/GTM roles · 60 min poll |
@@ -75,7 +74,6 @@ companies/saudi_ats.json
 ├── Sarj.ai          → Ashby
 ├── Echelon          → Ashby
 ├── Scale AI         → Greenhouse
-├── Canonical        → Greenhouse
 ├── Incorta          → Lever
 ├── UiPath           → Ashby
 ├── ElevenLabs       → Ashby
@@ -99,7 +97,7 @@ The adapters live in `sources/ats.py` and use public career-site read endpoints 
 
 ### Source scheduling and health
 
-GitHub Actions still starts the bot every 15 minutes, but Update 10 no longer fetches every source on every workflow run. `source_runs` persists `poll_interval_minutes`, `next_poll_at`, `health_status`, and `last_nonempty_at`. Core feeds (`linkedin`, `wuzzuf`, and the Saudi V2 shadow comparison) remain on a 15-minute cadence. Jobzaty discovery runs hourly. ATS companies use the interval declared in `companies/saudi_ats.json`; the initial registry uses 30–60 minute polls.
+GitHub Actions is configured for a 15-minute schedule, but scheduled workflow execution is best-effort and can be delayed. Update 10 no longer fetches every source on every workflow run. `source_runs` persists `poll_interval_minutes`, `next_poll_at`, `health_status`, and `last_nonempty_at`. Active core feeds (`linkedin` and the Saudi V2 shadow comparison) remain on a 15-minute requested cadence. Jobzaty discovery runs hourly. ATS companies use the interval declared in `companies/saudi_ats.json`; the initial registry uses 30–60 minute polls.
 
 A successful source schedules its next normal poll at its configured interval. A failed source retries on the next 15-minute workflow cycle even when its normal cadence is slower. Sources that are not due are skipped without blocking the Telegram delivery queue.
 
@@ -144,7 +142,7 @@ The matched evidence sentence and source key are stored in SQLite for audit, whi
 New sources are **shadowed by default**. The production allowlist currently contains only:
 
 ```python
-PRODUCTION_SOURCE_KEYS = {"linkedin", "wuzzuf"}
+PRODUCTION_SOURCE_KEYS = {"linkedin", "wuzzuf"}  # WUZZUF fetcher is currently paused in the runtime registry
 ```
 
 A source that is not in this set still runs the complete discovery pipeline:
@@ -357,6 +355,12 @@ Each attempt is recorded in `delivery_attempts` with useful debugging fields suc
 
 Legacy pending/retry work that is too old is expired instead of replayed.
 
+### SQLite retention and Git data branch
+
+`jobs` rows remain long-term as dedup memory, but operational/audit tables are bounded to 30 days. `db_maintenance.py` prunes terminal delivery rows, delivery attempts, source run history, source observations, old posting mirrors, and old description/evidence text. VACUUM runs weekly or immediately when the database reaches 70 MB. This keeps the live SQLite snapshot below GitHub's large-file danger zone without deleting historical job clusters.
+
+The Actions workflow now fetches only the current `data`-branch tip (`--depth=1`) instead of downloading the branch's full binary history on every run. The raw SQLite file remains the persisted snapshot so Git can continue delta-compressing page-level changes between commits.
+
 ## Runtime Flow
 
 ```text
@@ -364,7 +368,7 @@ GitHub Actions
     ↓
 restore jobs.db from data branch
     ↓
-fetch WUZZUF + LinkedIn + shadow Saudi ATS feeds
+fetch LinkedIn + shadow Saudi ATS/discovery feeds
     ↓
 quality + geography filtering
     ↓
@@ -500,6 +504,7 @@ python main.py
 ├── config.py
 ├── models.py
 ├── db.py
+├── db_maintenance.py
 ├── freshness.py
 ├── eligibility.py
 ├── dedup.py
@@ -529,6 +534,7 @@ python main.py
 │   ├── test_ats_detector.py
 │   ├── test_company_registry.py
 │   ├── test_db.py
+│   ├── test_db_maintenance.py
 │   ├── test_dedup.py
 │   ├── test_eligibility.py
 │   ├── test_freshness.py

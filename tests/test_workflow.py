@@ -29,6 +29,7 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_restore_uses_sqlite_database_only(self):
         self.assertIn("Restore SQLite database from data branch", self.text)
+        self.assertIn("git fetch --depth=1 origin data", self.text)
         self.assertRegex(self.text, r"git checkout origin/data -- jobs\.db")
         self.assertIn("db.py will create it during the first run", self.text)
         self.assertNotRegex(self.text, r"git checkout origin/data -- seen_jobs\.json")
@@ -36,6 +37,8 @@ class WorkflowConfigTests(unittest.TestCase):
     def test_save_persists_sqlite_database_only(self):
         self.assertIn("Save SQLite database to data branch", self.text)
         self.assertIn("cp jobs.db /tmp/job-bot-data/jobs.db", self.text)
+        self.assertIn("git checkout -B data origin/data", self.text)
+        self.assertNotIn("git fetch origin data 2>/dev/null", self.text)
         self.assertRegex(self.text, r"git add jobs\.db")
         self.assertIn("git rm -f seen_jobs.json", self.text)
         self.assertNotIn("git add seen_jobs.json", self.text)

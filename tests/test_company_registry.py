@@ -14,7 +14,7 @@ class CompanyRegistryTests(unittest.TestCase):
         companies = load_ats_companies()
         self.assertEqual([c.key for c in companies], [
             "hala", "minio", "soum", "sarjai", "echelon",
-            "scaleai", "canonical", "incorta", "uipath", "elevenlabs", "cognition", "leantech",
+            "scaleai", "incorta", "uipath", "elevenlabs", "cognition", "leantech",
             "cisco", "nttdata", "infobip", "hpe", "workday", "salesforce",
         ])
         self.assertEqual({c.ats for c in companies}, {"greenhouse", "lever", "ashby", "workday"})
@@ -32,7 +32,6 @@ class CompanyRegistryTests(unittest.TestCase):
             "sarjai": 60,
             "echelon": 60,
             "scaleai": 30,
-            "canonical": 60,
             "incorta": 60,
             "uipath": 60,
             "elevenlabs": 60,
@@ -62,7 +61,6 @@ class CompanyRegistryTests(unittest.TestCase):
                 "ATS Ashby sarjai",
                 "ATS Ashby echelon",
                 "ATS Greenhouse scaleai",
-                "ATS Greenhouse canonical",
                 "ATS Lever incorta",
                 "ATS Ashby uipath",
                 "ATS Ashby elevenlabs",

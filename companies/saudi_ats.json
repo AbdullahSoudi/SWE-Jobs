@@ -60,16 +60,6 @@
     "poll_interval_minutes": 30
   },
   {
-    "key": "canonical",
-    "company": "Canonical",
-    "ats": "greenhouse",
-    "tenant": "canonicaljobs",
-    "country": "SA",
-    "careers_url": "https://job-boards.greenhouse.io/canonicaljobs",
-    "enabled": true,
-    "poll_interval_minutes": 60
-  },
-  {
     "key": "incorta",
     "company": "Incorta",
     "ats": "lever",

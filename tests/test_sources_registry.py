@@ -22,7 +22,6 @@ class SourceRegistryTests(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "WUZZUF",
                 "LinkedIn",
                 "LinkedIn Saudi V2",
                 "Jobzaty",
@@ -32,7 +31,6 @@ class SourceRegistryTests(unittest.TestCase):
                 "ATS Ashby sarjai",
                 "ATS Ashby echelon",
                 "ATS Greenhouse scaleai",
-                "ATS Greenhouse canonical",
                 "ATS Lever incorta",
                 "ATS Ashby uipath",
                 "ATS Ashby elevenlabs",
@@ -50,7 +48,6 @@ class SourceRegistryTests(unittest.TestCase):
 
     def test_poll_interval_registry_keeps_core_hot_and_ats_adaptive(self):
         intervals = self.registry.SOURCE_POLL_INTERVAL_MINUTES
-        self.assertEqual(intervals["wuzzuf"], 15)
         self.assertEqual(intervals["linkedin"], 15)
         self.assertEqual(intervals["linkedin_saudi_v2"], 15)
         self.assertEqual(intervals["jobzaty"], 60)
@@ -91,10 +88,10 @@ class SourceRegistryTests(unittest.TestCase):
 
     def test_registry_contains_only_expected_core_fetcher_names(self):
         core_names = {fetcher.__name__ for _, fetcher in self.registry.CORE_FETCHERS}
-        self.assertEqual(core_names, {"fetch_wuzzuf", "fetch_linkedin", "fetch_linkedin_saudi_v2"})
+        self.assertEqual(core_names, {"fetch_linkedin", "fetch_linkedin_saudi_v2"})
         self.assertEqual(len(self.registry.SHADOW_BOARD_FETCHERS), 1)
         self.assertEqual(self.registry.SHADOW_BOARD_FETCHERS[0][1].__name__, "fetch_jobzaty")
-        self.assertEqual(len(self.registry.ATS_FETCHERS), 18)
+        self.assertEqual(len(self.registry.ATS_FETCHERS), 17)
 
 
 if __name__ == "__main__":

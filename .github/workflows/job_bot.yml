@@ -42,7 +42,10 @@ jobs:
 
       - name: Restore SQLite database from data branch
         run: |
-          git fetch origin data || true
+          # Fetch only the current data-branch tip. The data branch contains a
+          # binary SQLite snapshot on every commit, so fetching its full history
+          # becomes very expensive over time.
+          git fetch --depth=1 origin data || true
 
           if git checkout origin/data -- jobs.db 2>/dev/null; then
             echo "jobs.db restored: $(wc -c < jobs.db) bytes"
@@ -83,8 +86,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin data 2>/dev/null || true
-          git checkout data 2>/dev/null || git checkout --orphan data
+          # The restore step already fetched origin/data shallowly. Reuse that
+          # exact tip instead of downloading the growing binary history again.
+          git checkout -B data origin/data 2>/dev/null || git checkout --orphan data
 
           # Remove the old JSON persistence file if it exists from previous versions.
           git rm -f seen_jobs.json 2>/dev/null || true

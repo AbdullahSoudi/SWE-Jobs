@@ -77,6 +77,7 @@ from source_runtime import (
     is_source_due,
     normalize_poll_interval,
 )
+from db_maintenance import compact_database
 from db import (
     DB_FILE,
     connect,
@@ -927,6 +928,24 @@ def run_bot(
                     summary.admin_notifications_sent += 1
                 else:
                     log.warning("Admin daily digest failed: %s", digest_result.error)
+
+    try:
+        maintenance = compact_database(db_path, reference_time=run_reference)
+        if maintenance.ran:
+            log.info(
+                "Database maintenance: %.1f MB -> %.1f MB (reclaimed %.1f MB; "
+                "job_sends=%s, attempts=%s, source_history=%s, observations=%s, postings=%s)",
+                maintenance.before_bytes / (1024 * 1024),
+                maintenance.after_bytes / (1024 * 1024),
+                maintenance.reclaimed_bytes / (1024 * 1024),
+                maintenance.deleted_job_sends,
+                maintenance.deleted_delivery_attempts,
+                maintenance.deleted_source_history,
+                maintenance.deleted_source_observations,
+                maintenance.deleted_job_postings,
+            )
+    except Exception as exc:
+        log.warning("Database maintenance failed (non-critical): %s", exc)
 
     elapsed = time.time() - start
     log.info(
