@@ -285,6 +285,35 @@ persist delivery result/audit
 save jobs.db to data branch
 ```
 
+## Source Analytics (Shadow Evaluation)
+
+Schema v6 records a separate observation whenever a source sees a relevant job.
+This lets the bot compare production LinkedIn with `linkedin_saudi_v2` without
+credit depending on which source happened to be processed first. No historical
+source-discovery order is fabricated; observation analytics starts when v6 is deployed.
+
+Every run logs a compact Saudi 24-hour comparison for:
+
+- source-wide raw/relevant/fresh counts,
+- Saudi job discoveries recorded since observation tracking started,
+- first-discovery count/share,
+- mature 24-hour exclusive discoveries,
+- median lead time before another source sees the same job,
+- reliability and coverage gaps.
+
+`exclusive24h` is intentionally delayed: a first discovery is only scored after
+it has had a full 24 hours to appear on another source. This avoids declaring a
+source "exclusive" too early.
+
+For an on-demand report:
+
+```powershell
+python source_analytics.py --db jobs.db --hours 168 --saudi-only linkedin linkedin_saudi_v2
+```
+
+The raw/relevant run counters are source-wide. The discovery/first/exclusive
+metrics honor `--saudi-only`, so they are the fair part of the Saudi V2 comparison.
+
 ## GitHub Actions
 
 Workflow:
@@ -349,6 +378,7 @@ python main.py
 ├── models.py
 ├── db.py
 ├── freshness.py
+├── source_analytics.py
 ├── telegram_sender.py
 ├── cleanup.py
 ├── requirements.txt

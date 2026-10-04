@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from models import Job
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -246,6 +246,29 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_source_run_history_source_time
             ON source_run_history(source, run_at);
+
+        CREATE TABLE IF NOT EXISTS source_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            source_job_id TEXT DEFAULT '',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            times_seen INTEGER NOT NULL DEFAULT 1,
+            first_fresh_eligible INTEGER NOT NULL DEFAULT 0,
+            last_fresh_eligible INTEGER NOT NULL DEFAULT 0,
+            first_shadow_mode INTEGER NOT NULL DEFAULT 1,
+            last_shadow_mode INTEGER NOT NULL DEFAULT 1,
+            first_was_new_job INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(job_id, source),
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_source_observations_source_first
+            ON source_observations(source, first_seen_at);
+
+        CREATE INDEX IF NOT EXISTS idx_source_observations_job_first
+            ON source_observations(job_id, first_seen_at);
         """
     )
     previous_row = conn.execute(
@@ -359,7 +382,33 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_source_run_history_source_time
             ON source_run_history(source, run_at);
+
+        CREATE TABLE IF NOT EXISTS source_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            source_job_id TEXT DEFAULT '',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            times_seen INTEGER NOT NULL DEFAULT 1,
+            first_fresh_eligible INTEGER NOT NULL DEFAULT 0,
+            last_fresh_eligible INTEGER NOT NULL DEFAULT 0,
+            first_shadow_mode INTEGER NOT NULL DEFAULT 1,
+            last_shadow_mode INTEGER NOT NULL DEFAULT 1,
+            first_was_new_job INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(job_id, source),
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_observations_source_first
+            ON source_observations(source, first_seen_at);
+        CREATE INDEX IF NOT EXISTS idx_source_observations_job_first
+            ON source_observations(job_id, first_seen_at);
         """
+    )
+    _ensure_column(
+        conn,
+        "source_observations",
+        "first_was_new_job INTEGER NOT NULL DEFAULT 0",
     )
 
     # Only schema-v1 databases have legacy successful sources that predate
@@ -409,6 +458,15 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         # production source. Preserve that behavior during migration. New
         # source rows default to shadow_mode=1.
         conn.execute("UPDATE source_runs SET shadow_mode = 0")
+
+    if previous_version < 6:
+        # Observation analytics intentionally starts from deployment time.
+        # Historical alternate-source discovery order cannot be reconstructed
+        # safely from the old jobs table, so do not fabricate a backfill.
+        conn.execute(
+            "INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)",
+            ("source_analytics_started_at", now_utc()),
+        )
 
 
 def now_utc() -> str:
@@ -1050,6 +1108,72 @@ def update_source_run(
             max(0, int(shadow_eligible_count)), max(0, int(duration_ms)), ts,
         ),
     )
+
+
+def record_source_observation(
+    conn: sqlite3.Connection,
+    job_id: int,
+    source: str,
+    *,
+    source_job_id: str = "",
+    observed_at: str | None = None,
+    fresh_eligible: bool = False,
+    shadow_mode: bool = True,
+    was_new_job: bool = False,
+) -> None:
+    """Record that one source observed a persisted job.
+
+    The first timestamp is immutable and lets analytics compare which source
+    discovered the same persisted job first. Repeated sightings only update
+    last_seen/times_seen and the latest freshness/shadow state.
+    """
+    ts = observed_at or now_utc()
+    conn.execute(
+        """
+        INSERT INTO source_observations(
+            job_id, source, source_job_id, first_seen_at, last_seen_at, times_seen,
+            first_fresh_eligible, last_fresh_eligible, first_shadow_mode, last_shadow_mode,
+            first_was_new_job
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, source) DO UPDATE SET
+            source_job_id = CASE
+                WHEN excluded.source_job_id != '' THEN excluded.source_job_id
+                ELSE source_observations.source_job_id
+            END,
+            last_seen_at = excluded.last_seen_at,
+            times_seen = source_observations.times_seen + 1,
+            last_fresh_eligible = excluded.last_fresh_eligible,
+            last_shadow_mode = excluded.last_shadow_mode
+        """,
+        (
+            int(job_id), str(source), str(source_job_id or ""), ts, ts,
+            1 if fresh_eligible else 0, 1 if fresh_eligible else 0,
+            1 if shadow_mode else 0, 1 if shadow_mode else 0,
+            1 if was_new_job else 0,
+        ),
+    )
+
+
+def get_source_observations(
+    conn: sqlite3.Connection,
+    *,
+    source: str | None = None,
+    since: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return source observation rows, optionally filtered by source/time."""
+    clauses: list[str] = []
+    params: list[object] = []
+    if source is not None:
+        clauses.append("source = ?")
+        params.append(source)
+    if since is not None:
+        clauses.append("first_seen_at >= ?")
+        params.append(since)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return conn.execute(
+        "SELECT * FROM source_observations" + where + " ORDER BY first_seen_at, id",
+        params,
+    ).fetchall()
 
 
 def record_source_run_history(

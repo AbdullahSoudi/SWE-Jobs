@@ -54,6 +54,7 @@ from freshness import (
     iso_utc,
     utc_now,
 )
+from source_analytics import build_source_analytics, format_source_analytics
 from db import (
     DB_FILE,
     connect,
@@ -72,6 +73,7 @@ from db import (
     mark_source_baselined,
     mark_topic_sending,
     record_delivery_result,
+    record_source_observation,
     record_source_run_history,
     recover_stale_sending_deliveries,
     set_job_freshness_state,
@@ -294,7 +296,27 @@ def persist_filtered_jobs(
     for job in filtered:
         source_key = _source_key(job.source)
         metrics = source_metrics.setdefault(source_key, SourceCycleMetrics(status="ok"))
+        context = source_context.get(source_key, SourceContext(False, None))
+        policy = _policy_for_source(source_key)
+        decision = evaluate_new_posting(
+            _publication_evidence(job),
+            source_was_baselined=context.was_baselined,
+            previous_success_at=context.previous_success_at,
+            max_age_seconds=int(policy["max_age_seconds"]),
+            uncertain_fallback=str(policy.get("uncertain_fallback", "NONE")),
+            reference_time=now,
+        )
         job_id, is_new = upsert_job(conn, job)
+        record_source_observation(
+            conn,
+            job_id,
+            source_key,
+            source_job_id=job.source_job_id,
+            observed_at=iso_utc(now),
+            fresh_eligible=decision.send_eligible,
+            shadow_mode=_is_shadow_source(source_key, production_source_keys),
+            was_new_job=is_new,
+        )
         if not is_new:
             refreshed += 1
             metrics.refreshed_jobs += 1
@@ -307,16 +329,6 @@ def persist_filtered_jobs(
                 and get_job_send_status(conn, job_id) == "shadow"
                 and _source_key(get_job_primary_source(conn, job_id)) != source_key
             ):
-                context = source_context.get(source_key, SourceContext(False, None))
-                policy = _policy_for_source(source_key)
-                decision = evaluate_new_posting(
-                    _publication_evidence(job),
-                    source_was_baselined=context.was_baselined,
-                    previous_success_at=context.previous_success_at,
-                    max_age_seconds=int(policy["max_age_seconds"]),
-                    uncertain_fallback=str(policy.get("uncertain_fallback", "NONE")),
-                    reference_time=now,
-                )
                 set_job_freshness_state(conn, job_id, decision.status, decision.reason)
                 if decision.send_eligible:
                     set_job_primary_source(conn, job_id, source_key, job.source_job_id)
@@ -327,16 +339,6 @@ def persist_filtered_jobs(
 
         inserted += 1
         metrics.inserted_jobs += 1
-        context = source_context.get(source_key, SourceContext(False, None))
-        policy = _policy_for_source(source_key)
-        decision = evaluate_new_posting(
-            _publication_evidence(job),
-            source_was_baselined=context.was_baselined,
-            previous_success_at=context.previous_success_at,
-            max_age_seconds=int(policy["max_age_seconds"]),
-            uncertain_fallback=str(policy.get("uncertain_fallback", "NONE")),
-            reference_time=now,
-        )
         set_job_freshness_state(conn, job_id, decision.status, decision.reason)
 
         if decision.send_eligible:
@@ -767,6 +769,19 @@ def run_bot(
             )
 
         summary.total_jobs_in_db = count_jobs(conn)
+
+        # Compact Saudi source comparison in Actions logs. Observation-based
+        # discovery metrics intentionally begin with schema v6; no historical
+        # discovery order is guessed or backfilled.
+        analytics_rows = build_source_analytics(
+            conn,
+            sources=("linkedin", "linkedin_saudi_v2"),
+            hours=24,
+            saudi_only=True,
+            reference_time=run_reference,
+        )
+        for line in format_source_analytics(analytics_rows, label="Saudi 24h"):
+            log.info(line)
 
     elapsed = time.time() - start
     log.info(
