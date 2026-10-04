@@ -38,6 +38,14 @@ class FreshnessEvidenceTests(unittest.TestCase):
         self.assertEqual(freshness_decision(fresh, 3600, reference_time=self.now), FRESH)
         self.assertEqual(freshness_decision(old, 3600, reference_time=self.now), TOO_OLD)
 
+    def test_plus_suffixed_day_bucket_is_understood(self):
+        evidence = parse_relative_publication(
+            "Posted 30+ Days Ago",
+            fetched_at=datetime(2026, 10, 4, 18, 0, tzinfo=UTC),
+        )
+        self.assertEqual(evidence.precision, "DAY")
+        self.assertEqual(evidence.latest, "2026-09-04T18:00:00Z")
+
     def test_missing_timestamp_is_uncertain(self):
         evidence = parse_relative_publication("", fetched_at=self.now)
         self.assertEqual(freshness_decision(evidence, 3600, reference_time=self.now), UNCERTAIN)

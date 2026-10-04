@@ -37,6 +37,12 @@ class SourceRegistryTests(unittest.TestCase):
                 "ATS Ashby elevenlabs",
                 "ATS Ashby cognition",
                 "ATS Ashby leantech",
+                "ATS Workday cisco",
+                "ATS Workday nttdata",
+                "ATS Workday infobip",
+                "ATS Workday hpe",
+                "ATS Workday workday",
+                "ATS Workday salesforce",
             ],
         )
 
@@ -48,6 +54,7 @@ class SourceRegistryTests(unittest.TestCase):
         self.assertEqual(intervals["linkedin_saudi_v2"], 15)
         self.assertEqual(intervals["ats_greenhouse_hala"], 30)
         self.assertEqual(intervals["ats_greenhouse_minio"], 60)
+        self.assertEqual(intervals["ats_workday_cisco"], 60)
 
     def test_no_legacy_sources_are_registered(self):
         names = {name.lower() for name, _ in self.registry.ALL_FETCHERS}
@@ -83,7 +90,7 @@ class SourceRegistryTests(unittest.TestCase):
     def test_registry_contains_only_expected_core_fetcher_names(self):
         core_names = {fetcher.__name__ for _, fetcher in self.registry.CORE_FETCHERS}
         self.assertEqual(core_names, {"fetch_wuzzuf", "fetch_linkedin", "fetch_linkedin_saudi_v2"})
-        self.assertEqual(len(self.registry.ATS_FETCHERS), 12)
+        self.assertEqual(len(self.registry.ATS_FETCHERS), 18)
 
 
 if __name__ == "__main__":

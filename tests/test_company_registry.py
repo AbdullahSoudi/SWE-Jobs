@@ -15,8 +15,9 @@ class CompanyRegistryTests(unittest.TestCase):
         self.assertEqual([c.key for c in companies], [
             "hala", "minio", "soum", "sarjai", "echelon",
             "scaleai", "canonical", "incorta", "uipath", "elevenlabs", "cognition", "leantech",
+            "cisco", "nttdata", "infobip", "hpe", "workday", "salesforce",
         ])
-        self.assertEqual({c.ats for c in companies}, {"greenhouse", "lever", "ashby"})
+        self.assertEqual({c.ats for c in companies}, {"greenhouse", "lever", "ashby", "workday"})
         self.assertTrue(all(c.country == "SA" for c in companies))
         self.assertTrue(all(c.source_key.startswith("ats_") for c in companies))
 
@@ -37,10 +38,17 @@ class CompanyRegistryTests(unittest.TestCase):
             "elevenlabs": 60,
             "cognition": 60,
             "leantech": 30,
+            "cisco": 60,
+            "nttdata": 60,
+            "infobip": 60,
+            "hpe": 60,
+            "workday": 60,
+            "salesforce": 60,
         })
         source_intervals = build_ats_poll_intervals()
         self.assertEqual(source_intervals["ats_greenhouse_hala"], 30)
         self.assertEqual(source_intervals["ats_ashby_echelon"], 60)
+        self.assertEqual(source_intervals["ats_workday_cisco"], 60)
 
     def test_fetchers_have_stable_source_names(self):
         fetchers = build_ats_fetchers()
@@ -60,11 +68,30 @@ class CompanyRegistryTests(unittest.TestCase):
                 "ATS Ashby elevenlabs",
                 "ATS Ashby cognition",
                 "ATS Ashby leantech",
+                "ATS Workday cisco",
+                "ATS Workday nttdata",
+                "ATS Workday infobip",
+                "ATS Workday hpe",
+                "ATS Workday workday",
+                "ATS Workday salesforce",
             ],
         )
         for _, fetcher in fetchers:
             self.assertTrue(callable(fetcher))
             self.assertTrue(fetcher.__name__.startswith("fetch_ats_"))
+
+    def test_workday_registry_requires_host_and_site(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry.json"
+            path.write_text(json.dumps([{
+                "key": "badworkday",
+                "company": "Bad Workday",
+                "ats": "workday",
+                "tenant": "badworkday",
+                "country": "SA",
+            }]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "requires host and site"):
+                load_ats_companies(path)
 
     def test_registry_rejects_unknown_ats(self):
         with tempfile.TemporaryDirectory() as tmp:

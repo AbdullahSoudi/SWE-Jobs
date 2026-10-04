@@ -119,7 +119,7 @@ def parse_relative_publication(raw_text: str, fetched_at: datetime | None = None
     patterns = (
         (r"(\d+)\s*(?:minute|minutes|min|mins)\s+ago", timedelta(minutes=1), PRECISION_MINUTE),
         (r"(\d+)\s*(?:hour|hours|hr|hrs)\s+ago", timedelta(hours=1), PRECISION_HOUR),
-        (r"(\d+)\s*(?:day|days)\s+ago", timedelta(days=1), PRECISION_DAY),
+        (r"(\d+)\+?\s*(?:day|days)\s+ago", timedelta(days=1), PRECISION_DAY),
         (r"(\d+)\s*(?:week|weeks)\s+ago", timedelta(weeks=1), PRECISION_DAY),
     )
     for pattern, bucket, precision in patterns:

@@ -19,6 +19,8 @@ class ReadmeDocumentationTests(unittest.TestCase):
         self.assertIn("Greenhouse", self.text)
         self.assertIn("Lever", self.text)
         self.assertIn("Ashby", self.text)
+        self.assertIn("Workday", self.text)
+        self.assertIn("discover_ats_candidates", self.text)
         self.assertIn("companies/saudi_ats.json", self.text)
 
     def test_readme_documents_single_primary_topic_design(self):

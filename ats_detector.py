@@ -1,11 +1,13 @@
 """Deterministic ATS URL detection for Saudi company-registry discovery.
 
-This module intentionally does no network requests. It recognizes public job-board
-URLs already observed in LinkedIn/off-site apply links and extracts the tenant
-identifier needed by the reusable ATS adapters.
+This module intentionally performs no network requests. It recognizes public
+career-board URLs already observed elsewhere and extracts the identifiers needed
+by reusable ATS adapters. Unknown/custom career sites return ``None`` rather
+than being guessed.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -15,6 +17,9 @@ class ATSDetection:
     ats: str
     tenant: str
     board_url: str
+    host: str = ""
+    site: str = ""
+    locale: str = ""
 
 
 def _parts(url: str) -> tuple[str, list[str]]:
@@ -24,15 +29,52 @@ def _parts(url: str) -> tuple[str, list[str]]:
     return host, parts
 
 
-def detect_ats_url(url: str) -> ATSDetection | None:
-    """Recognize Greenhouse, Lever, or Ashby public board/apply URLs.
+def _looks_like_locale(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-z]{2}(?:-[A-Z]{2})?", value or ""))
 
-    The returned ``tenant`` is suitable for ``companies/saudi_ats.json``.
-    Unknown/custom career sites deliberately return ``None`` rather than
-    guessing.
-    """
+
+def detect_ats_url(url: str) -> ATSDetection | None:
+    """Recognize Greenhouse, Lever, Ashby, or Workday public career URLs."""
     host, parts = _parts(url)
-    if not host or not parts:
+    if not host:
+        return None
+
+    if host.endswith(".myworkdayjobs.com"):
+        # Internal public CXS endpoint:
+        # /wday/cxs/{tenant}/{site}/jobs
+        if len(parts) >= 5 and parts[:2] == ["wday", "cxs"]:
+            tenant, site = parts[2], parts[3]
+            return ATSDetection(
+                "workday",
+                tenant,
+                f"https://{host}/en-US/{site}",
+                host=host,
+                site=site,
+                locale="en-US",
+            )
+
+        # Human career URL:
+        # /en-US/{site}/job/... or /{site}/job/...
+        index = 0
+        locale = "en-US"
+        if parts and _looks_like_locale(parts[0]):
+            locale = parts[0]
+            index = 1
+        if index < len(parts):
+            site = parts[index]
+            tenant = host.split(".", 1)[0]
+            if site not in {"wday", "job", "jobs"}:
+                return ATSDetection(
+                    "workday",
+                    tenant,
+                    f"https://{host}/{locale}/{site}",
+                    host=host,
+                    site=site,
+                    locale=locale,
+                )
+        return None
+
+    if not parts:
         return None
 
     if host in {"job-boards.greenhouse.io", "boards.greenhouse.io"}:
@@ -62,3 +104,19 @@ def detect_ats_url(url: str) -> ATSDetection | None:
         return ATSDetection("ashby", tenant, f"https://jobs.ashbyhq.com/{tenant}")
 
     return None
+
+
+def discover_ats_candidates(urls) -> list[ATSDetection]:
+    """Return unique deterministic ATS candidates from an iterable of URLs.
+
+    The function is intentionally side-effect free: discovery never mutates the
+    live company registry and therefore can never activate a source by accident.
+    """
+    found: dict[tuple[str, str, str, str], ATSDetection] = {}
+    for url in urls:
+        detected = detect_ats_url(str(url or ""))
+        if not detected:
+            continue
+        key = (detected.ats, detected.host, detected.tenant, detected.site)
+        found.setdefault(key, detected)
+    return sorted(found.values(), key=lambda item: (item.ats, item.tenant.lower(), item.site.lower()))

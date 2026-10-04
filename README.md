@@ -8,7 +8,7 @@ The product goal is a real-time job feed, not a historical job archive:
 
 ## Current Design
 
-- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2 and an evidence-driven shadow ATS company registry (Greenhouse, Lever, Ashby).
+- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2 and an evidence-driven shadow ATS company registry (Greenhouse, Lever, Ashby, Workday).
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
@@ -42,6 +42,12 @@ Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core f
 | ElevenLabs | Shadow ATS | Ashby; Saudi AI/engineering/GTM roles · 60 min poll |
 | Cognition | Shadow ATS | Ashby; Riyadh/MENA applied-AI roles · 60 min poll |
 | Lean Technologies | Shadow ATS | Ashby; Riyadh fintech/platform roles · 30 min poll |
+| Cisco | Shadow ATS | Workday CXS; Saudi technology/customer-delivery roles · 60 min poll |
+| NTT DATA | Shadow ATS | Workday CXS; Riyadh platform/network/technology roles · 60 min poll |
+| Infobip | Shadow ATS | Workday CXS; Riyadh solution engineering/cloud communications · 60 min poll |
+| HPE | Shadow ATS | Workday CXS; Riyadh data/cloud/COOP roles · 60 min poll |
+| Workday | Shadow ATS | Workday CXS; Riyadh Workday/solution roles · 60 min poll |
+| Salesforce | Shadow ATS | Workday CXS; Saudi cloud/solution roles · 60 min poll |
 | Legacy aggregators | Disabled | Not registered at runtime |
 
 All ATS feeds are shadow by default because their generated source keys are not in `PRODUCTION_SOURCE_KEYS`. Their first successful fetch establishes a no-send baseline, then later newly observed jobs can be measured without Telegram delivery.
@@ -63,16 +69,22 @@ companies/saudi_ats.json
 ├── UiPath           → Ashby
 ├── ElevenLabs       → Ashby
 ├── Cognition        → Ashby
-└── Lean Technologies→ Ashby
+├── Lean Technologies→ Ashby
+├── Cisco            → Workday
+├── NTT DATA         → Workday
+├── Infobip          → Workday
+├── HPE              → Workday
+├── Workday          → Workday
+└── Salesforce       → Workday
 ```
 
 `company_registry.py` validates the registry and builds one source fetcher per employer. This gives each company its own source health/freshness/observation metrics instead of hiding all ATS traffic behind one aggregate source.
 
-The adapters live in `sources/ats.py` and use public job-board read endpoints only. Greenhouse now preserves `first_published` when the public feed provides it, falling back to snapshot observation when it does not. Lever remains snapshot-based because its public v0 posting timestamp is not reliable enough for our freshness gate. Ashby preserves `publishedAt`. Lever `allLocations` and Ashby secondary locations are inspected so a Saudi location is not lost when it is not the primary display location. Global company boards are still filtered to explicit Saudi locations before the tech classifier runs.
+The adapters live in `sources/ats.py` and use public career-site read endpoints only. Greenhouse preserves `first_published` when the public feed provides it, falling back to snapshot observation when it does not. Lever remains snapshot-based because its public v0 posting timestamp is not reliable enough for our freshness gate. Ashby preserves `publishedAt`. Workday uses the public CXS endpoint (`POST /wday/cxs/{tenant}/{site}/jobs`) with the platform's hard page size of 20. To avoid crawling thousands of global postings, each Workday registry entry searches only Saudi-oriented terms such as `Riyadh`, `Saudi Arabia`, and `KSA`, then validates the returned location locally. If a Workday search exceeds the configured page cap, the adapter fails closed instead of treating a truncated/re-ranked result set as a trustworthy freshness snapshot. Lever `allLocations` and Ashby secondary locations are inspected so a Saudi location is not lost when it is not the primary display location. Global company boards are always filtered to explicit Saudi locations before the tech classifier runs.
 
 ### ATS discovery helper
 
-`ats_detector.py` recognizes Greenhouse, Lever, and Ashby job/apply URLs and extracts the tenant/board identifier without making a network request. This is the foundation for bootstrapping future registry candidates from off-site apply URLs observed in LinkedIn or other trusted feeds. Unknown/custom career sites return no guess and remain manual-review candidates.
+`ats_detector.py` recognizes Greenhouse, Lever, Ashby, and Workday job/board URLs and extracts the tenant/board identifiers without making a network request. `discover_ats_candidates()` deduplicates a batch of observed URLs into review candidates, but discovery is deliberately side-effect free: it never edits `companies/saudi_ats.json` and can never activate a source automatically. This is the foundation for bootstrapping future registry candidates from off-site apply URLs observed in trusted feeds. Unknown/custom career sites return no guess and remain manual-review candidates.
 
 ### Source scheduling and health
 
@@ -88,7 +100,7 @@ Health intentionally distinguishes a quiet ATS tenant from a broken integration:
 - `DEGRADED` — transport/schema failure, or repeated empty runs on a core/search source.
 - `UNHEALTHY` — three consecutive fetch failures.
 
-If two or more tenants on the same ATS adapter all fail in the same bot run, an adapter-level outage warning is logged so a Greenhouse/Ashby parser change is not mistaken for multiple unrelated employer failures.
+If two or more tenants on the same ATS adapter all fail in the same bot run, an adapter-level outage warning is logged so a Greenhouse/Ashby/Workday parser or platform change is not mistaken for multiple unrelated employer failures.
 
 ### Saudi LinkedIn V2 shadow experiment
 

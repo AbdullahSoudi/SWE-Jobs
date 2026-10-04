@@ -4,7 +4,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sources.ats import fetch_ashby_company, fetch_greenhouse_company, fetch_lever_company
+from datetime import UTC, datetime
+
+from sources.ats import fetch_ashby_company, fetch_greenhouse_company, fetch_lever_company, fetch_workday_company
 
 
 class ATSAdapterTests(unittest.TestCase):
@@ -160,6 +162,112 @@ class ATSAdapterTests(unittest.TestCase):
         self.assertEqual(job.published_at_est, "2026-10-04T18:21:55Z")
         self.assertTrue(job.is_remote)
         self.assertIn("Engineering", job.tags)
+
+
+
+    def test_workday_searches_saudi_terms_deduplicates_and_preserves_freshness(self):
+        calls = []
+
+        def poster(url, payload=None, headers=None):
+            calls.append((url, payload, headers))
+            term = payload["searchText"]
+            if term == "Riyadh":
+                return {
+                    "total": 2,
+                    "jobPostings": [
+                        {
+                            "title": "Backend Software Engineer",
+                            "externalPath": "/job/Riyadh-Saudi-Arabia/Backend-Software-Engineer_R123",
+                            "locationsText": "Riyadh, Saudi Arabia",
+                            "postedOn": "Posted 15 Minutes Ago",
+                            "bulletFields": ["Full time"],
+                        },
+                        {
+                            "title": "Software Engineer",
+                            "externalPath": "/job/Dubai-UAE/Software-Engineer_R999",
+                            "locationsText": "Dubai, UAE",
+                            "postedOn": "Posted Today",
+                        },
+                    ],
+                }
+            if term == "Saudi Arabia":
+                return {
+                    "total": 2,
+                    "jobPostings": [
+                        {
+                            "title": "Backend Software Engineer",
+                            "externalPath": "/job/Riyadh-Saudi-Arabia/Backend-Software-Engineer_R123",
+                            "locationsText": "Riyadh, Saudi Arabia",
+                            "postedOn": "Posted 15 Minutes Ago",
+                        },
+                        {
+                            "title": "Cloud Engineer",
+                            "externalPath": "/job/Khobar-Saudi-Arabia/Cloud-Engineer_R456",
+                            "locationsText": "Khobar, Saudi Arabia",
+                            "postedOn": "Posted Today",
+                        },
+                    ],
+                }
+            return {"total": 0, "jobPostings": []}
+
+        jobs = fetch_workday_company(
+            host="acme.wd5.myworkdayjobs.com",
+            tenant="acme",
+            site="ExternalCareers",
+            company="Acme",
+            source_key="ats_workday_acme",
+            search_terms=["Riyadh", "Saudi Arabia", "KSA"],
+            max_pages_per_term=1,
+            http_poster=poster,
+            fetched_at=datetime(2026, 10, 4, 18, 0, tzinfo=UTC),
+        )
+
+        self.assertEqual([job.title for job in jobs], ["Backend Software Engineer", "Cloud Engineer"])
+        backend = jobs[0]
+        self.assertEqual(backend.source_job_id, "job/Riyadh-Saudi-Arabia/Backend-Software-Engineer_R123")
+        self.assertEqual(backend.published_precision, "MINUTE")
+        self.assertEqual(backend.published_at_latest, "2026-10-04T17:45:00Z")
+        self.assertEqual(
+            backend.url,
+            "https://acme.wd5.myworkdayjobs.com/en-US/ExternalCareers/job/Riyadh-Saudi-Arabia/Backend-Software-Engineer_R123",
+        )
+        cloud = jobs[1]
+        self.assertEqual(cloud.published_precision, "NONE")
+        self.assertEqual(cloud.location, "Khobar, Saudi Arabia")
+        self.assertEqual([call[1]["searchText"] for call in calls], ["Riyadh", "Saudi Arabia", "KSA"])
+        self.assertTrue(all(call[1]["limit"] == 20 for call in calls))
+
+    def test_workday_refuses_truncated_search_snapshot(self):
+        rows = [{
+            "title": f"Engineer {idx}",
+            "externalPath": f"/job/Riyadh/Engineer-{idx}_R{idx}",
+            "locationsText": "Riyadh, Saudi Arabia",
+            "postedOn": "Posted Today",
+        } for idx in range(20)]
+
+        with self.assertRaisesRegex(RuntimeError, "search saturated"):
+            fetch_workday_company(
+                host="acme.wd5.myworkdayjobs.com",
+                tenant="acme",
+                site="ExternalCareers",
+                company="Acme",
+                source_key="ats_workday_acme",
+                search_terms=["Riyadh"],
+                max_pages_per_term=1,
+                http_poster=lambda *args, **kwargs: {"total": 75, "jobPostings": rows},
+            )
+
+    def test_workday_failure_is_not_silently_reported_as_empty_success(self):
+        with self.assertRaises(RuntimeError):
+            fetch_workday_company(
+                host="acme.wd5.myworkdayjobs.com",
+                tenant="acme",
+                site="ExternalCareers",
+                company="Acme",
+                source_key="ats_workday_acme",
+                search_terms=["Riyadh"],
+                http_poster=lambda *args, **kwargs: None,
+            )
 
     def test_adapter_failure_is_not_silently_reported_as_empty_success(self):
         with self.assertRaises(RuntimeError):

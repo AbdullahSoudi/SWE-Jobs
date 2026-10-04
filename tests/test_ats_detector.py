@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ats_detector import detect_ats_url
+from ats_detector import detect_ats_url, discover_ats_candidates
 
 
 class ATSDetectorTests(unittest.TestCase):
@@ -36,6 +36,33 @@ class ATSDetectorTests(unittest.TestCase):
             detect_ats_url("https://api.ashbyhq.com/posting-api/job-board/sarjai").tenant,
             "sarjai",
         )
+
+
+
+    def test_detects_workday_human_and_cxs_urls(self):
+        human = detect_ats_url(
+            "https://cisco.wd5.myworkdayjobs.com/en-US/cisco_careers/job/Riyadh-Saudi-Arabia/Customer-Delivery-Advisor_2021494-1"
+        )
+        self.assertEqual((human.ats, human.tenant, human.site), ("workday", "cisco", "cisco_careers"))
+        self.assertEqual(human.host, "cisco.wd5.myworkdayjobs.com")
+        self.assertEqual(human.board_url, "https://cisco.wd5.myworkdayjobs.com/en-US/cisco_careers")
+
+        cxs = detect_ats_url(
+            "https://salesforce.wd12.myworkdayjobs.com/wday/cxs/salesforce/External_Career_Site/jobs"
+        )
+        self.assertEqual((cxs.ats, cxs.tenant, cxs.site), ("workday", "salesforce", "External_Career_Site"))
+
+    def test_candidate_discovery_is_unique_and_side_effect_free(self):
+        candidates = discover_ats_candidates([
+            "https://jobs.lever.co/incorta/abc",
+            "https://jobs.lever.co/incorta/def",
+            "https://cisco.wd5.myworkdayjobs.com/en-US/cisco_careers/job/X_R1",
+            "https://careers.example.com/jobs/123",
+        ])
+        self.assertEqual([(item.ats, item.tenant) for item in candidates], [
+            ("lever", "incorta"),
+            ("workday", "cisco"),
+        ])
 
     def test_unknown_custom_career_site_is_not_guessed(self):
         self.assertIsNone(detect_ats_url("https://careers.example.com/jobs/123"))

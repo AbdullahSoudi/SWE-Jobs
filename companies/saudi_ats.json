@@ -118,5 +118,113 @@
     "careers_url": "https://jobs.ashbyhq.com/LeanTech",
     "enabled": true,
     "poll_interval_minutes": 30
+  },
+  {
+    "key": "cisco",
+    "company": "Cisco",
+    "ats": "workday",
+    "tenant": "cisco",
+    "host": "cisco.wd5.myworkdayjobs.com",
+    "site": "cisco_careers",
+    "locale": "en-US",
+    "country": "SA",
+    "careers_url": "https://cisco.wd5.myworkdayjobs.com/en-US/cisco_careers",
+    "enabled": true,
+    "poll_interval_minutes": 60,
+    "search_terms": [
+      "Riyadh",
+      "Saudi Arabia",
+      "KSA"
+    ]
+  },
+  {
+    "key": "nttdata",
+    "company": "NTT DATA",
+    "ats": "workday",
+    "tenant": "nttlimited",
+    "host": "nttlimited.wd3.myworkdayjobs.com",
+    "site": "NTT_Careers",
+    "locale": "en-US",
+    "country": "SA",
+    "careers_url": "https://nttlimited.wd3.myworkdayjobs.com/en-US/NTT_Careers",
+    "enabled": true,
+    "poll_interval_minutes": 60,
+    "search_terms": [
+      "Riyadh",
+      "Saudi Arabia",
+      "KSA"
+    ]
+  },
+  {
+    "key": "infobip",
+    "company": "Infobip",
+    "ats": "workday",
+    "tenant": "infobip",
+    "host": "infobip.wd3.myworkdayjobs.com",
+    "site": "InfobipCareers",
+    "locale": "en-US",
+    "country": "SA",
+    "careers_url": "https://infobip.wd3.myworkdayjobs.com/en-US/InfobipCareers",
+    "enabled": true,
+    "poll_interval_minutes": 60,
+    "search_terms": [
+      "Riyadh",
+      "Saudi Arabia",
+      "KSA"
+    ]
+  },
+  {
+    "key": "hpe",
+    "company": "HPE",
+    "ats": "workday",
+    "tenant": "hpe",
+    "host": "hpe.wd5.myworkdayjobs.com",
+    "site": "Jobsathpe",
+    "locale": "en-US",
+    "country": "SA",
+    "careers_url": "https://hpe.wd5.myworkdayjobs.com/en-US/Jobsathpe",
+    "enabled": true,
+    "poll_interval_minutes": 60,
+    "search_terms": [
+      "Riyadh",
+      "Saudi Arabia",
+      "KSA"
+    ]
+  },
+  {
+    "key": "workday",
+    "company": "Workday",
+    "ats": "workday",
+    "tenant": "workday",
+    "host": "workday.wd5.myworkdayjobs.com",
+    "site": "Workday",
+    "locale": "en-US",
+    "country": "SA",
+    "careers_url": "https://workday.wd5.myworkdayjobs.com/en-US/Workday",
+    "enabled": true,
+    "poll_interval_minutes": 60,
+    "search_terms": [
+      "Riyadh",
+      "Saudi Arabia",
+      "KSA"
+    ]
+  },
+  {
+    "key": "salesforce",
+    "company": "Salesforce",
+    "ats": "workday",
+    "tenant": "salesforce",
+    "host": "salesforce.wd12.myworkdayjobs.com",
+    "site": "External_Career_Site",
+    "locale": "en-US",
+    "country": "SA",
+    "careers_url": "https://salesforce.wd12.myworkdayjobs.com/en-US/External_Career_Site",
+    "enabled": true,
+    "poll_interval_minutes": 60,
+    "search_terms": [
+      "Riyadh",
+      "Saudi Arabia",
+      "KSA"
+    ]
   }
 ]
