@@ -34,6 +34,7 @@ try:
 except ModuleNotFoundError:  # local flat-file test layout
     from __init__ import ALL_FETCHERS
 from models import Job, is_programming_job, passes_geo_filter
+from classifier import is_tech_job
 from telegram_sender import (
     CONFIG_ERROR,
     RATE_LIMITED,
@@ -60,6 +61,8 @@ from db import (
     expire_legacy_backlog_once,
     expire_stale_unsent_jobs,
     get_jobs_for_sending,
+    get_job_primary_source,
+    get_job_send_status,
     get_metadata,
     ensure_topic_deliveries,
     get_source_last_success,
@@ -72,6 +75,7 @@ from db import (
     record_source_run_history,
     recover_stale_sending_deliveries,
     set_job_freshness_state,
+    set_job_primary_source,
     set_job_send_status,
     set_metadata,
     update_source_run,
@@ -143,7 +147,7 @@ class RunSummary:
 
 
 def _source_key(value: str) -> str:
-    return (value or "").strip().lower()
+    return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def _is_seed_mode(seed_mode: bool | None = None) -> bool:
@@ -212,8 +216,8 @@ def should_keep_job(job: Job) -> bool:
         return False
 
     source = _source_key(job.source)
-    if source == "linkedin":
-        return passes_geo_filter(job)
+    if source in {"linkedin", "linkedin_saudi_v2"}:
+        return is_tech_job(job) and passes_geo_filter(job)
 
     return is_programming_job(job) and passes_geo_filter(job)
 
@@ -294,6 +298,31 @@ def persist_filtered_jobs(
         if not is_new:
             refreshed += 1
             metrics.refreshed_jobs += 1
+
+            # Shadow observations must never poison production discovery. If a
+            # production source later sees a still-fresh job that was first
+            # discovered by a shadow source, promote it into the delivery queue.
+            if (
+                not _is_shadow_source(source_key, production_source_keys)
+                and get_job_send_status(conn, job_id) == "shadow"
+                and _source_key(get_job_primary_source(conn, job_id)) != source_key
+            ):
+                context = source_context.get(source_key, SourceContext(False, None))
+                policy = _policy_for_source(source_key)
+                decision = evaluate_new_posting(
+                    _publication_evidence(job),
+                    source_was_baselined=context.was_baselined,
+                    previous_success_at=context.previous_success_at,
+                    max_age_seconds=int(policy["max_age_seconds"]),
+                    uncertain_fallback=str(policy.get("uncertain_fallback", "NONE")),
+                    reference_time=now,
+                )
+                set_job_freshness_state(conn, job_id, decision.status, decision.reason)
+                if decision.send_eligible:
+                    set_job_primary_source(conn, job_id, source_key, job.source_job_id)
+                    set_job_send_status(conn, job_id, "pending")
+                    fresh_new += 1
+                    metrics.fresh_new_jobs += 1
             continue
 
         inserted += 1

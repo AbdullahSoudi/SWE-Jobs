@@ -559,7 +559,7 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
         conn.execute(
             """
             UPDATE jobs
-            SET source = ?, source_job_id = ?, title = ?, company = ?, location = ?,
+            SET title = ?, company = ?, location = ?,
                 url = ?, canonical_url = ?, salary = ?, job_type = ?, tags_json = ?,
                 is_remote = ?, original_source = ?,
                 published_at_raw = COALESCE(NULLIF(?, ''), published_at_raw),
@@ -572,8 +572,6 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             WHERE id = ?
             """,
             (
-                job.source,
-                source_job_id,
                 job.title,
                 job.company or "",
                 job.location or "",
@@ -888,6 +886,30 @@ def get_sent_topic_keys(conn: sqlite3.Connection, job_id: int) -> set[str]:
     ).fetchall()
     return {str(row["topic_key"]) for row in rows}
 
+
+
+
+
+
+def get_job_primary_source(conn: sqlite3.Connection, job_id: int) -> str:
+    """Return the source that originally owns the canonical job row."""
+    row = conn.execute("SELECT source FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return str(row["source"]) if row else ""
+
+def get_job_send_status(conn: sqlite3.Connection, job_id: int) -> str:
+    """Return the current job-level send status."""
+    row = conn.execute("SELECT send_status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return str(row["send_status"]) if row else ""
+
+
+def set_job_primary_source(
+    conn: sqlite3.Connection, job_id: int, source: str, source_job_id: str = ""
+) -> None:
+    """Promote the source that is allowed to deliver a previously-shadow job."""
+    conn.execute(
+        "UPDATE jobs SET source = ?, source_job_id = ? WHERE id = ?",
+        (source, source_job_id or "", job_id),
+    )
 
 def set_job_send_status(conn: sqlite3.Connection, job_id: int, status: str) -> None:
     """Set the aggregate send status for a job."""

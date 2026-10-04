@@ -692,6 +692,7 @@ DEFAULT_EMOJI = "💻"
 SOURCE_DISPLAY = {
     "wuzzuf": "WUZZUF",
     "linkedin": "LinkedIn",
+    "linkedin_saudi_v2": "LinkedIn Saudi V2 (Shadow)",
 }
 
 # ─── Misc ────────────────────────────────────────────────────
@@ -711,6 +712,10 @@ PENDING_SEND_MAX_AGE_MINUTES = int(os.getenv("PENDING_SEND_MAX_AGE_MINUTES", "60
 
 SOURCE_FRESHNESS_POLICIES = {
     "linkedin": {
+        "max_age_seconds": LINKEDIN_FRESHNESS_SECONDS,
+        "uncertain_fallback": "SOURCE_WINDOW",
+    },
+    "linkedin_saudi_v2": {
         "max_age_seconds": LINKEDIN_FRESHNESS_SECONDS,
         "uncertain_fallback": "SOURCE_WINDOW",
     },

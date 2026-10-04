@@ -521,7 +521,7 @@ class MainSqliteFlowTests(unittest.TestCase):
             with connect(db_path) as conn:
                 self.assertEqual(get_jobs_for_sending(conn), [])
 
-    def test_unclassified_linkedin_job_is_stored_then_skipped_by_primary_router(self):
+    def test_unclassified_linkedin_job_is_filtered_before_persistence(self):
         job = Job(
             title="People Operations Coordinator",
             company="Acme",
@@ -544,17 +544,14 @@ class MainSqliteFlowTests(unittest.TestCase):
                 seed_mode=False,
                 reference_time=self.now,
             )
-            self.assertEqual(summary.filtered_jobs, 1)
-            self.assertEqual(summary.inserted_jobs, 1)
-            self.assertEqual(summary.fresh_new_jobs, 1)
+            self.assertEqual(summary.filtered_jobs, 0)
+            self.assertEqual(summary.inserted_jobs, 0)
+            self.assertEqual(summary.fresh_new_jobs, 0)
             self.assertEqual(summary.topic_send_successes, 0)
-            self.assertEqual(summary.skipped_jobs, 1)
+            self.assertEqual(summary.skipped_jobs, 0)
             self.assertEqual(sent, [])
             with connect(db_path) as conn:
-                row = conn.execute(
-                    "SELECT send_status FROM jobs WHERE url = ?", (job.url,)
-                ).fetchone()
-                self.assertEqual(row["send_status"], "skipped")
+                self.assertEqual(count_jobs(conn), 0)
 
     def test_old_linkedin_job_is_stored_but_never_sent(self):
         evidence = parse_relative_publication("2 hours ago", fetched_at=self.now)
@@ -754,3 +751,69 @@ class MainSqliteFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ShadowPromotionTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime.now(UTC).replace(microsecond=0)
+
+    def _fresh(self, source):
+        evidence = parse_relative_publication("5 minutes ago", fetched_at=self.now)
+        return Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url="https://www.linkedin.com/jobs/view/9999999999",
+            source=source,
+            tags=[".NET"],
+            source_job_id="9999999999",
+            published_at_raw=evidence.raw,
+            published_at_earliest=evidence.earliest,
+            published_at_latest=evidence.latest,
+            published_at_est=evidence.estimate,
+            published_precision=evidence.precision,
+            time_semantics=evidence.semantics,
+        )
+
+    def test_shadow_discovery_does_not_block_later_production_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            stamp = (self.now - timedelta(minutes=15)).isoformat().replace("+00:00", "Z")
+            with connect(db_path) as conn:
+                for source in ("linkedin_saudi_v2", "linkedin"):
+                    update_source_run(conn, source, "ok", last_run_at=stamp)
+                    mark_source_baselined(conn, source, baselined_at=stamp)
+
+            shadow_job = self._fresh("linkedin_saudi_v2")
+            first = main.run_bot(
+                db_path=db_path,
+                fetchers=[("LinkedIn Saudi V2", lambda: [shadow_job])],
+                sender=lambda job_obj, topics: {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                reference_time=self.now,
+            )
+            self.assertEqual(first.shadow_eligible_jobs, 1)
+            with connect(db_path) as conn:
+                row = conn.execute("SELECT source, send_status FROM jobs").fetchone()
+                self.assertEqual(row["source"], "linkedin_saudi_v2")
+                self.assertEqual(row["send_status"], "shadow")
+
+            sent = []
+            production_job = self._fresh("linkedin")
+            second = main.run_bot(
+                db_path=db_path,
+                fetchers=[("LinkedIn", lambda: [production_job])],
+                sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                reference_time=self.now + timedelta(minutes=10),
+            )
+            self.assertEqual(second.inserted_jobs, 0)
+            self.assertEqual(second.refreshed_jobs, 1)
+            self.assertEqual(second.fresh_new_jobs, 1)
+            self.assertEqual(second.topic_send_successes, 1)
+            self.assertEqual(sent, ["Backend Developer"])
+            with connect(db_path) as conn:
+                row = conn.execute("SELECT source, send_status FROM jobs").fetchone()
+                self.assertEqual(row["source"], "linkedin")
+                self.assertEqual(row["send_status"], "sent")

@@ -1,6 +1,6 @@
 # Programming Jobs Telegram Bot
 
-Quality-first Telegram bot for **fresh jobs** from WUZZUF and LinkedIn, with a growing focus on Egypt and Saudi Arabia.
+Quality-first Telegram bot for **fresh software/tech jobs** from WUZZUF and LinkedIn, with Saudi Arabia now the main expansion focus.
 
 The product goal is a real-time job feed, not a historical job archive:
 
@@ -8,14 +8,14 @@ The product goal is a real-time job feed, not a historical job archive:
 
 ## Current Design
 
-- **Sources:** WUZZUF + LinkedIn public job search cards.
+- **Sources:** WUZZUF + production LinkedIn, plus a shadow-only Saudi LinkedIn V2 strategy for measured comparison.
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
-- **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram.
+- **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
 - **Per-source run history:** fetch counts, freshness outcomes, failures, duration, shadow yield, and coverage gaps are stored for later source scoring.
 - **SQLite state:** jobs, source state, freshness evidence, delivery state, and delivery attempts live in `jobs.db`.
 - **Durable Telegram outbox:** delivery state is written before the network call.
-- **One job = one Telegram post:** each job is assigned one primary role topic only.
+- **Measured bilingual classifier:** English + Arabic tech-title classification drives both broad LinkedIn filtering and the single primary Telegram topic.
 - **Market/source as metadata:** Egypt/Saudi/Remote and the source are shown in the message instead of creating duplicate topic posts.
 - **Telegram backpressure:** rate limiting, `retry_after`, bounded transient retries, and ambiguous-timeout protection.
 - **GitHub Actions:** runs every 15 minutes and persists `jobs.db` on the `data` branch.
@@ -28,17 +28,30 @@ Enabled sources are defined in `sources/__init__.py`:
 ALL_FETCHERS = [
     ("WUZZUF", fetch_wuzzuf),
     ("LinkedIn", fetch_linkedin),
+    ("LinkedIn Saudi V2", fetch_linkedin_saudi_v2),  # shadow
 ]
 ```
 
 | Source | Status | Notes |
 |---|---|---|
 | WUZZUF | Enabled | Public category/search cards; mainly Egypt |
-| LinkedIn | Enabled | Public guest search cards; fragile and subject to source changes |
+| LinkedIn | Production | Existing public guest search strategy |
+| LinkedIn Saudi V2 | Shadow | Saudi `geoId=100459316`, broad country search + ERP/business-systems gap fillers; never sends yet |
 | Legacy sources | Disabled | Not registered at runtime |
 
 LinkedIn is intentionally treated as a fragile source. The bot does not log in, access profiles, collect member data, or scrape full descriptions.
 
+### Saudi LinkedIn V2 shadow experiment
+
+The V2 strategy uses Saudi Arabia's LinkedIn `geoId` and a broad country-level search, then lets the local classifier decide which cards are tech. A small ERP/business-systems gap-filler layer covers SAP/ERP, Oracle/Odoo, and Dynamics/Salesforce. It intentionally does **not** hard-code undocumented LinkedIn job-function IDs yet; those can be A/B tested later in shadow if the broad strategy is too noisy or request-heavy.
+
+The current V2 source is not in `PRODUCTION_SOURCE_KEYS`, so it can populate metrics but cannot create Telegram deliveries.
+
+## Classifier and Saudi Location Normalization
+
+`classifier.py` is the deterministic routing/filtering baseline. It supports English and Arabic tech titles, uses strong non-tech exclusions, and returns exactly one topic or `not tech`. A golden test set currently covers representative Backend, Frontend, Mobile, Data & AI, DevOps, QA, Cybersecurity, ERP, Internship, general-tech, Arabic, and non-tech cases. The dataset is intentionally small to start and should be expanded from real production misses/false positives.
+
+`locations.py` normalizes common Saudi Arabic/English city variants (for example Riyadh/الرياض, Jeddah/Jiddah/جدة, Khobar/الخبر, Dammam/الدمام, NEOM/نيوم). Location remains metadata, not a routing dimension. Messages can include city hashtags such as `#Riyadh` without creating extra Telegram topics.
 
 ## Shadow Mode and Source Metrics
 
@@ -59,7 +72,7 @@ fetch
 → NO Telegram delivery
 ```
 
-Fresh jobs discovered by a shadow source are stored with `send_status = shadow`. When the source is later promoted, historical shadow rows remain suppressed; only jobs discovered **after** promotion can create Telegram deliveries. This prevents a promotion-time backlog flood.
+Fresh jobs discovered by a shadow source are stored with `send_status = shadow`. When that same source is later promoted, historical shadow rows remain suppressed; only jobs discovered **after** promotion can create Telegram deliveries. If a **different production source** independently discovers the same still-fresh job, the row is promoted into the delivery queue so shadow mode cannot hide a legitimate production discovery.
 
 Each source run appends one row to `source_run_history` with fields such as:
 
@@ -102,7 +115,7 @@ Retired routing dimensions such as `LinkedIn Fresh`, `Egypt`, and `Saudi` are no
 Country is represented in the card and with lightweight hashtags such as:
 
 ```text
-#SaudiArabia
+#SaudiArabia #Riyadh
 #Egypt
 #Remote
 ```

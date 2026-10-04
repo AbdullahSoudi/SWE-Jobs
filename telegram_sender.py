@@ -16,7 +16,9 @@ from typing import Callable
 
 import requests
 
-from models import Job, is_programming_job
+from models import Job
+from classifier import classify_job
+from locations import saudi_location_hashtags
 from config import (
     CHANNELS,
     PRIMARY_TOPIC_ORDER,
@@ -108,37 +110,16 @@ def _is_saudi_job(job: Job) -> bool:
 
 
 def route_job(job: Job) -> list[str]:
-    """Return exactly one primary Telegram topic for a relevant job.
-
-    Category priority is configured in ``PRIMARY_TOPIC_ORDER``.  Country and
-    source are intentionally not routing dimensions anymore: duplicating one
-    job into role + country + source topics created unnecessary Telegram load
-    and a noisy user experience.
-    """
-    tags_str = " ".join(str(t) for t in (job.tags or []))
-    searchable = f"{job.title} {job.company} {tags_str}".lower()
-
-    for key in PRIMARY_TOPIC_ORDER:
-        ch = CHANNELS[key]
-        if _match_keywords(searchable, ch.get("keywords", [])):
-            return [key]
-
-    # Keep a useful catch-all for generic technical titles such as
-    # "Software Engineer" while dropping unrelated LinkedIn jobs that were
-    # previously kept only because they came from LinkedIn.
-    if is_programming_job(job):
-        return ["general"]
-
-    return []
+    """Return exactly one measured primary topic for a relevant tech job."""
+    result = classify_job(job)
+    return [result.topic] if result.is_tech and result.topic else []
 
 
 # ─── Message Formatting ──────────────────────────────────────
 
 def _market_hashtags(job: Job) -> list[str]:
-    tags: list[str] = []
-    if _is_saudi_job(job):
-        tags.append("#SaudiArabia")
-    elif _is_egypt_job(job):
+    tags: list[str] = saudi_location_hashtags(job.location)
+    if not tags and _is_egypt_job(job):
         tags.append("#Egypt")
 
     location = (job.location or "").lower()
