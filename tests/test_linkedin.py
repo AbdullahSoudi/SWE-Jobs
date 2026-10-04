@@ -51,7 +51,7 @@ class LinkedInParserTests(unittest.TestCase):
 
     def test_relative_url_and_remote_detection(self):
         jobs = linkedin.parse_linkedin_html(SAMPLE_HTML, {"f_WT": "2"})
-        self.assertEqual(jobs[1].url, "https://www.linkedin.com/jobs/view/data-analyst-at-beta-9876543210")
+        self.assertEqual(jobs[1].url, "https://www.linkedin.com/jobs/view/9876543210")
         self.assertTrue(jobs[1].is_remote)
         self.assertIn("Remote", jobs[1].tags)
 
@@ -63,7 +63,7 @@ class LinkedInParserTests(unittest.TestCase):
     def test_deduplicates_same_card_url(self):
         jobs = linkedin.parse_linkedin_html(DUPLICATE_HTML, {})
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].url, "https://www.linkedin.com/jobs/view/test-at-x-1111111111")
+        self.assertEqual(jobs[0].url, "https://www.linkedin.com/jobs/view/1111111111")
 
     def test_search_list_is_intentionally_small(self):
         self.assertLessEqual(len(linkedin.LINKEDIN_SEARCHES), 24)

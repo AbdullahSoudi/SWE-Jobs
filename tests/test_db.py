@@ -1,14 +1,17 @@
 import os
 import sqlite3
 import tempfile
+from datetime import UTC, datetime, timedelta
 import unittest
 
 from models import Job
 from db import (
     canonicalize_url,
     connect,
+    expire_legacy_backlog_once,
     count_jobs,
     get_jobs_for_sending,
+    get_metadata,
     get_source_last_run,
     get_sent_topic_keys,
     job_content_hash,
@@ -126,6 +129,47 @@ class DbLayerTests(unittest.TestCase):
 
                 update_source_run(conn, "wuzzuf", "ok", last_run_at="2026-05-24T00:00:00Z")
                 self.assertEqual(get_source_last_run(conn, "wuzzuf"), "2026-05-24T00:00:00Z")
+
+    def test_legacy_backlog_expiry_is_one_time_and_preserves_fresh_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            reference = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+            old_ts = (reference - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+            fresh_ts = (reference - timedelta(minutes=15)).isoformat().replace("+00:00", "Z")
+
+            with connect(db_path) as conn:
+                old_id, _ = upsert_job(
+                    conn,
+                    Job("Backend Developer", "Old Co", "Riyadh", "https://jobs.example.com/old", "linkedin"),
+                )
+                fresh_id, _ = upsert_job(
+                    conn,
+                    Job("Frontend Developer", "Fresh Co", "Riyadh", "https://jobs.example.com/fresh", "linkedin"),
+                )
+                conn.execute("UPDATE jobs SET first_seen_at = ? WHERE id = ?", (old_ts, old_id))
+                conn.execute("UPDATE jobs SET first_seen_at = ? WHERE id = ?", (fresh_ts, fresh_id))
+
+                expired = expire_legacy_backlog_once(conn, 120, reference_time=reference)
+                self.assertEqual(expired, 1)
+                old_status = conn.execute("SELECT send_status FROM jobs WHERE id = ?", (old_id,)).fetchone()["send_status"]
+                fresh_status = conn.execute("SELECT send_status FROM jobs WHERE id = ?", (fresh_id,)).fetchone()["send_status"]
+                self.assertEqual(old_status, "expired")
+                self.assertEqual(fresh_status, "pending")
+                self.assertIsNotNone(get_metadata(conn, "legacy_backlog_expiry_v1_applied_at"))
+
+                # The migration marker prevents later runs from reclassifying rows.
+                self.assertEqual(expire_legacy_backlog_once(conn, 1, reference_time=reference), 0)
+
+    def test_expired_is_a_valid_terminal_send_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            with connect(db_path) as conn:
+                job_id, _ = upsert_job(
+                    conn,
+                    Job("QA Engineer", "Acme", "Riyadh", "https://jobs.example.com/expired", "linkedin"),
+                )
+                set_job_send_status(conn, job_id, "expired")
+                self.assertEqual(get_jobs_for_sending(conn), [])
 
     def test_invalid_status_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

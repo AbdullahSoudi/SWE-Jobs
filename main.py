@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from config import MAX_JOBS_PER_RUN, SEED_MODE_ENV
+from config import LEGACY_BACKLOG_MAX_AGE_MINUTES, MAX_JOBS_PER_RUN, SEED_MODE_ENV
 try:
     from sources import ALL_FETCHERS
 except ModuleNotFoundError:  # local flat-file test layout
@@ -30,6 +30,7 @@ from db import (
     DB_FILE,
     connect,
     count_jobs,
+    expire_legacy_backlog_once,
     get_jobs_for_sending,
     get_sent_topic_keys,
     record_topic_send,
@@ -62,6 +63,7 @@ class RunSummary:
     topic_send_successes: int = 0
     topic_send_failures: int = 0
     skipped_jobs: int = 0
+    expired_backlog_jobs: int = 0
     total_jobs_in_db: int = 0
     seed_mode: bool = False
 
@@ -233,6 +235,17 @@ def run_bot(
         log.warning(f"Cleanup failed (non-critical): {exc}")
 
     with connect(db_path) as conn:
+        summary.expired_backlog_jobs = expire_legacy_backlog_once(
+            conn,
+            max_age_minutes=LEGACY_BACKLOG_MAX_AGE_MINUTES,
+        )
+        if summary.expired_backlog_jobs:
+            log.info(
+                "🧹 Expired %s legacy pending/retry jobs older than %s minutes.",
+                summary.expired_backlog_jobs,
+                LEGACY_BACKLOG_MAX_AGE_MINUTES,
+            )
+
         all_jobs = fetch_all_jobs(conn, fetchers)
         summary.raw_jobs = len(all_jobs)
         log.info(f"Total raw jobs fetched: {summary.raw_jobs}")

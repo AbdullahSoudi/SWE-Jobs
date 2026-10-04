@@ -14,7 +14,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterator, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -23,6 +23,7 @@ from models import Job
 
 DB_FILE = "jobs.db"
 SCHEMA_VERSION = 1
+LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
     "utm_",
@@ -171,6 +172,66 @@ def init_db(conn: sqlite3.Connection) -> None:
 def now_utc() -> str:
     """Return an ISO-8601 UTC timestamp without microseconds."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def get_metadata(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    """Return one metadata value, or None when the key does not exist."""
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (key,),
+    ).fetchone()
+    return str(row["value"]) if row else None
+
+
+def set_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Insert or replace one metadata value."""
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+        (key, str(value)),
+    )
+
+
+def expire_legacy_backlog_once(
+    conn: sqlite3.Connection,
+    max_age_minutes: int,
+    reference_time: datetime | None = None,
+) -> int:
+    """Expire legacy unsent rows once so stale backlog is never replayed.
+
+    This is intentionally a one-time compatibility migration for databases
+    created by the old retry model. It is not the final freshness gate. Future
+    delivery deadlines will handle newly-created retries separately.
+    """
+    if max_age_minutes <= 0:
+        raise ValueError("max_age_minutes must be greater than zero")
+
+    if get_metadata(conn, LEGACY_BACKLOG_MIGRATION_KEY):
+        return 0
+
+    now = reference_time or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    else:
+        now = now.astimezone(UTC)
+
+    cutoff = (now - timedelta(minutes=max_age_minutes)).replace(microsecond=0)
+    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+
+    cur = conn.execute(
+        """
+        UPDATE jobs
+        SET send_status = 'expired'
+        WHERE send_status IN ('pending', 'retry', 'partial')
+          AND first_seen_at < ?
+        """,
+        (cutoff_iso,),
+    )
+    set_metadata(
+        conn,
+        LEGACY_BACKLOG_MIGRATION_KEY,
+        now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    )
+    return int(cur.rowcount)
 
 
 def normalize_text(value: object) -> str:
@@ -374,7 +435,7 @@ def get_sent_topic_keys(conn: sqlite3.Connection, job_id: int) -> set[str]:
 
 def set_job_send_status(conn: sqlite3.Connection, job_id: int, status: str) -> None:
     """Set the aggregate send status for a job."""
-    allowed = {"pending", "sent", "retry", "partial", "skipped"}
+    allowed = {"pending", "sent", "retry", "partial", "skipped", "expired"}
     if status not in allowed:
         raise ValueError(f"Invalid send status: {status}")
     conn.execute("UPDATE jobs SET send_status = ? WHERE id = ?", (status, job_id))

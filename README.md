@@ -13,6 +13,7 @@ This version intentionally replaced the old 15-source aggregator with a narrower
 - **SQLite tracking**: jobs are stored in `jobs.db` before Telegram sending.
 - **Per-topic send tracking**: a job is marked fully sent only after all intended topics succeed.
 - **Retry-safe**: partial Telegram failures are retried only for the failed topics.
+- **Legacy backlog safety**: old pending/retry rows are expired once instead of being replayed as fresh jobs.
 - **GitHub Actions only**: no VPS or external database required.
 - **15-minute schedule**: cron runs every 15 minutes.
 
@@ -197,6 +198,13 @@ Send statuses include:
 | `partial` | Sent to at least one topic, failed in at least one other topic |
 | `retry` | Send failed and should be retried |
 | `skipped` | No matching topics, or seed mode intentionally skipped sending |
+| `expired` | Legacy unsent job is too old to send as a fresh notification |
+
+### Legacy Backlog Safety
+
+On the first run after this update, the bot performs a one-time migration. Any legacy `pending`, `retry`, or `partial` row whose `first_seen_at` is older than `LEGACY_BACKLOG_MAX_AGE_MINUTES` (default: 120 minutes) is marked `expired` and will not be sent. The migration is recorded in the `metadata` table so it runs only once.
+
+This is a compatibility cleanup for the old backlog. The later freshness/outbox refactor will enforce deadlines for newly-created deliveries.
 
 ## Runtime Flow
 

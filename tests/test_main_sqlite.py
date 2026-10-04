@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import sys
@@ -137,6 +138,40 @@ class MainSqliteFlowTests(unittest.TestCase):
             self.assertEqual(sent, [])
             with connect(self.make_db_path(tmp)) as conn:
                 self.assertEqual(get_jobs_for_sending(conn), [])
+
+    def test_run_expires_old_legacy_backlog_before_sending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            old_job = Job(
+                title="Backend Developer",
+                company="Legacy Co",
+                location="Riyadh, Saudi Arabia",
+                url="https://www.linkedin.com/jobs/view/7777777777",
+                source="linkedin",
+            )
+            with connect(db_path) as conn:
+                main.upsert_jobs(conn, [old_job])
+                # upsert_jobs returns counts; fetch the inserted row id directly.
+                row = conn.execute("SELECT id FROM jobs WHERE url = ?", (old_job.url,)).fetchone()
+                old_ts = (datetime.now(UTC) - timedelta(hours=3)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                conn.execute("UPDATE jobs SET first_seen_at = ? WHERE id = ?", (old_ts, row["id"]))
+
+            sent = []
+            summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[],
+                sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+            )
+
+            self.assertEqual(summary.expired_backlog_jobs, 1)
+            self.assertEqual(summary.pending_processed, 0)
+            self.assertEqual(sent, [])
+            with connect(db_path) as conn:
+                status = conn.execute("SELECT send_status FROM jobs WHERE url = ?", (old_job.url,)).fetchone()["send_status"]
+                self.assertEqual(status, "expired")
 
     def test_failed_source_does_not_stop_other_sources(self):
         good_job = Job(

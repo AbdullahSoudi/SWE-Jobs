@@ -692,3 +692,7 @@ SOURCE_DISPLAY = {
 MAX_JOBS_PER_RUN = 100   # safety cap per run
 REQUEST_TIMEOUT = 15     # seconds
 SEED_MODE_ENV = "SEED_MODE"  # env var to force seed mode
+
+# One-time safety migration for the legacy pending/retry backlog. Jobs older
+# than this are expired instead of being sent as if they were newly discovered.
+LEGACY_BACKLOG_MAX_AGE_MINUTES = int(os.getenv("LEGACY_BACKLOG_MAX_AGE_MINUTES", "120"))
