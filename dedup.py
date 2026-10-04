@@ -16,6 +16,7 @@ from typing import Iterable
 from classifier import normalize_text
 from locations import normalize_saudi_location
 from models import Job
+from source_trust import trust_score
 
 _ALIAS_FILE = Path(__file__).with_name("companies") / "company_aliases.json"
 
@@ -200,16 +201,8 @@ def _time_compatible(job: Job, row, max_days: int = 14) -> bool:
 
 
 def source_trust(source: str) -> int:
-    key = normalize_text(source).replace(" ", "_")
-    if key.startswith("ats_"):
-        return 100
-    if key == "linkedin":
-        return 80
-    if key == "linkedin_saudi_v2":
-        return 75
-    if key == "wuzzuf":
-        return 70
-    return 50
+    """Backward-compatible wrapper around the centralized trust policy."""
+    return trust_score(source)
 
 
 def find_cross_source_match(conn, job: Job, *, recent_since: str) -> ClusterMatch | None:

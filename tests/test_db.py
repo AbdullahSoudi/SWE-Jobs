@@ -362,7 +362,7 @@ class FreshnessSchemaV3Tests(unittest.TestCase):
                 row = conn.execute("SELECT * FROM source_runs WHERE source = 'linkedin'").fetchone()
                 self.assertEqual(row["last_success_at"], "2026-10-04T12:00:00Z")
                 self.assertEqual(row["baselined_at"], "2026-10-04T12:00:00Z")
-                self.assertEqual(get_metadata(conn, "schema_version"), "9")
+                self.assertEqual(get_metadata(conn, "schema_version"), "10")
 
     def test_new_source_does_not_auto_baseline_across_reconnects(self):
         from db import is_source_baselined, mark_source_baselined

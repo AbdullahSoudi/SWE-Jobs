@@ -62,15 +62,73 @@ class CrossSourceDedupTests(unittest.TestCase):
                     source_job_id="222-gh",
                 ))
                 row = conn.execute(
-                    "SELECT source, preferred_source, preferred_url FROM jobs WHERE id = ?",
+                    "SELECT source, preferred_source, preferred_source_key, preferred_url FROM jobs WHERE id = ?",
                     (job_id,),
                 ).fetchone()
                 self.assertEqual(row["source"], "linkedin")
                 self.assertEqual(row["preferred_source"], "ats_greenhouse_hala")
+                self.assertEqual(row["preferred_source_key"], "ats_greenhouse_hala")
                 self.assertIn("greenhouse.io", row["preferred_url"])
                 delivery_job = get_jobs_for_sending(conn)[0].to_job()
                 self.assertIn("greenhouse.io", delivery_job.url)
                 self.assertEqual(delivery_job.original_source, "ats_greenhouse_hala")
+
+
+    def test_lower_trust_source_cannot_replace_official_apply_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with connect(os.path.join(tmp, "jobs.db")) as conn:
+                job_id, _ = upsert_job(conn, self._job(
+                    title="Senior Backend Platform Engineer",
+                    company="HALA",
+                    url="https://job-boards.greenhouse.io/hala/jobs/999",
+                    source="ats_greenhouse_hala",
+                    source_job_id="gh-999",
+                ))
+                upsert_job(conn, self._job(
+                    title="Platform Senior Backend Engineer",
+                    company="HALA",
+                    url="https://linkedin.com/jobs/view/999",
+                    source="linkedin",
+                    source_job_id="li-999",
+                ))
+                row = conn.execute(
+                    "SELECT source, preferred_source_key, preferred_url FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                self.assertEqual(row["source"], "ats_greenhouse_hala")
+                self.assertEqual(row["preferred_source_key"], "ats_greenhouse_hala")
+                self.assertIn("greenhouse.io", row["preferred_url"])
+
+    def test_lower_trust_third_source_cannot_downgrade_linkedin_to_board_after_ats_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with connect(os.path.join(tmp, "jobs.db")) as conn:
+                job_id, _ = upsert_job(conn, self._job(
+                    title="Senior Backend Platform Engineer",
+                    company="HALA",
+                    url="https://linkedin.com/jobs/view/1000",
+                    source="linkedin",
+                    source_job_id="li-1000",
+                ))
+                upsert_job(conn, self._job(
+                    title="Platform Senior Backend Engineer",
+                    company="HALA",
+                    url="https://job-boards.greenhouse.io/hala/jobs/1000",
+                    source="ats_greenhouse_hala",
+                    source_job_id="gh-1000",
+                ))
+                upsert_job(conn, self._job(
+                    title="Senior Platform Backend Engineer",
+                    company="HALA",
+                    url="https://wuzzuf.net/jobs/p/hala-1000",
+                    source="wuzzuf",
+                    source_job_id="wz-1000",
+                ))
+                row = conn.execute(
+                    "SELECT preferred_source_key, preferred_url FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                self.assertEqual(row["preferred_source_key"], "ats_greenhouse_hala")
+                self.assertIn("greenhouse.io", row["preferred_url"])
 
     def test_seniority_conflict_is_not_merged(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -23,7 +23,7 @@ from models import Job
 from dedup import find_cross_source_match, source_trust
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -56,6 +56,7 @@ class StoredJob:
     canonical_url: str
     preferred_url: str
     preferred_source: str
+    preferred_source_key: str
     salary: str
     job_type: str
     tags: list
@@ -90,6 +91,7 @@ class StoredJob:
             tags=self.tags,
             is_remote=self.is_remote,
             original_source=self.preferred_source or self.original_source,
+            apply_source_key=self.preferred_source_key or self.source,
             source_job_id=self.source_job_id,
             description=self.description,
             eligibility=self.eligibility,
@@ -150,6 +152,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             canonical_url TEXT NOT NULL,
             preferred_url TEXT DEFAULT '',
             preferred_source TEXT DEFAULT '',
+            preferred_source_key TEXT DEFAULT '',
             salary TEXT DEFAULT '',
             job_type TEXT DEFAULT '',
             tags_json TEXT DEFAULT '[]',
@@ -357,6 +360,7 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
     for definition in (
         "preferred_url TEXT DEFAULT ''",
         "preferred_source TEXT DEFAULT ''",
+        "preferred_source_key TEXT DEFAULT ''",
     ):
         _ensure_column(conn, "jobs", definition)
 
@@ -628,6 +632,33 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
             "UPDATE jobs SET eligibility = 'NOT_SPECIFIED' WHERE eligibility IS NULL OR eligibility = ''"
         )
 
+    if previous_version < 10:
+        # Persist the source key that owns the preferred apply URL. Existing
+        # v8/v9 rows already contain the selected URL/label; recover the key
+        # from posting history where possible, otherwise fall back to the
+        # cluster's primary/discovery source.
+        rows = conn.execute(
+            "SELECT id, source, preferred_url FROM jobs ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            preferred_url = canonicalize_url(str(row["preferred_url"] or ""))
+            preferred_key = str(row["source"] or "")
+            if preferred_url:
+                posting = conn.execute(
+                    """
+                    SELECT source FROM job_postings
+                    WHERE job_id = ? AND canonical_url = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (int(row["id"]), preferred_url),
+                ).fetchone()
+                if posting:
+                    preferred_key = str(posting["source"] or preferred_key)
+            conn.execute(
+                "UPDATE jobs SET preferred_source_key = ? WHERE id = ?",
+                (preferred_key, int(row["id"])),
+            )
+
 def now_utc() -> str:
     """Return an ISO-8601 UTC timestamp without microseconds."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -819,35 +850,36 @@ def _maybe_upgrade_preferred_link(
 ) -> None:
     """Prefer official ATS apply links without changing the delivery source."""
     row = conn.execute(
-        "SELECT source, preferred_source, preferred_url FROM jobs WHERE id = ?",
+        "SELECT source, preferred_source, preferred_source_key, preferred_url FROM jobs WHERE id = ?",
         (job_id,),
     ).fetchone()
     if not row:
         return
     current_source_key = str(row["source"] or "")
-    preferred_label = str(row["preferred_source"] or current_source_key)
+    preferred_source_key = str(row["preferred_source_key"] or "")
 
-    # preferred_source is a display label for ATS postings, so infer current
-    # trust from the cluster's primary source unless the preferred URL already
-    # came from an ATS observation.
-    current_trust = source_trust(current_source_key)
-    preferred_row = conn.execute(
-        """
-        SELECT source FROM job_postings
-        WHERE job_id = ? AND canonical_url = ?
-        ORDER BY id DESC LIMIT 1
-        """,
-        (job_id, canonicalize_url(str(row["preferred_url"] or ""))),
-    ).fetchone()
-    if preferred_row:
-        current_trust = source_trust(str(preferred_row["source"] or current_source_key))
+    # v10 persists the key that actually owns the selected apply URL. Legacy
+    # rows can still infer it from posting history until migration backfills it.
+    current_apply_key = preferred_source_key or current_source_key
+    if not preferred_source_key:
+        preferred_row = conn.execute(
+            """
+            SELECT source FROM job_postings
+            WHERE job_id = ? AND canonical_url = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (job_id, canonicalize_url(str(row["preferred_url"] or ""))),
+        ).fetchone()
+        if preferred_row:
+            current_apply_key = str(preferred_row["source"] or current_source_key)
+    current_trust = source_trust(current_apply_key)
 
     incoming_trust = source_trust(job.source)
     if incoming_trust <= current_trust:
         return
     conn.execute(
-        "UPDATE jobs SET preferred_url = ?, preferred_source = ? WHERE id = ?",
-        (job.url, job.original_source or job.source, job_id),
+        "UPDATE jobs SET preferred_url = ?, preferred_source = ?, preferred_source_key = ? WHERE id = ?",
+        (job.url, job.original_source or job.source, job.source, job_id),
     )
 
 
@@ -1072,13 +1104,13 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
         """
         INSERT INTO jobs (
             source, source_job_id, title, company, location, url, canonical_url,
-            preferred_url, preferred_source, salary, job_type, tags_json,
+            preferred_url, preferred_source, preferred_source_key, salary, job_type, tags_json,
             is_remote, original_source, description, eligibility, eligibility_evidence, eligibility_source,
             content_hash, send_status, published_at_raw, published_at_earliest, published_at_latest,
             published_at_est, published_precision, time_semantics,
             freshness_status, freshness_reason, first_seen_at, last_seen_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 'UNKNOWN', '', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 'UNKNOWN', '', ?, ?)
         """,
         (
             job.source,
@@ -1090,6 +1122,7 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             canonical_url,
             job.url,
             preferred_source,
+            job.source,
             job.salary or "",
             job.job_type or "",
             tags_json,
@@ -1750,6 +1783,7 @@ def _row_to_stored_job(row: sqlite3.Row) -> StoredJob:
         canonical_url=row["canonical_url"],
         preferred_url=(row["preferred_url"] or "") if "preferred_url" in row.keys() else row["url"],
         preferred_source=(row["preferred_source"] or "") if "preferred_source" in row.keys() else row["source"],
+        preferred_source_key=(row["preferred_source_key"] or "") if "preferred_source_key" in row.keys() else row["source"],
         salary=row["salary"] or "",
         job_type=row["job_type"] or "",
         tags=tags,

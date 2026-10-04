@@ -105,6 +105,36 @@ class TelegramRoutingTests(unittest.TestCase):
         self.assertNotIn("#Egypt", message)
 
 
+
+    def test_official_apply_link_keeps_discovery_source_visible(self):
+        job = Job(
+            title="Backend Developer",
+            company="HALA",
+            location="Riyadh, Saudi Arabia",
+            url="https://job-boards.greenhouse.io/hala/jobs/123",
+            source="linkedin",
+            original_source="HALA Careers",
+            apply_source_key="ats_greenhouse_hala",
+        )
+        message = format_job_message(job)
+        self.assertIn("Apply on official careers", message)
+        self.assertIn("Discovered via: LinkedIn", message)
+        self.assertIn("Apply: HALA Careers (official)", message)
+
+    def test_official_primary_source_is_not_described_as_discovered_elsewhere(self):
+        job = Job(
+            title="Backend Developer",
+            company="HALA",
+            location="Riyadh, Saudi Arabia",
+            url="https://job-boards.greenhouse.io/hala/jobs/124",
+            source="ats_greenhouse_hala",
+            original_source="HALA Careers",
+            apply_source_key="ats_greenhouse_hala",
+        )
+        message = format_job_message(job)
+        self.assertIn("Source: HALA Careers (official)", message)
+        self.assertNotIn("Discovered via:", message)
+
     def test_saudi_eligibility_is_metadata_not_a_topic(self):
         saudi_only = Job(
             title="Backend Developer",

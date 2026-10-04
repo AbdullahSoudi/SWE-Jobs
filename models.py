@@ -8,6 +8,7 @@ Handles keyword matching and geo-based filtering:
 from dataclasses import dataclass, field
 from typing import Optional
 import config
+from source_trust import is_official_source
 
 
 def _flatten_tags(tags) -> str:
@@ -36,7 +37,8 @@ class Job:
     job_type: str = ""
     tags: list = field(default_factory=list)
     is_remote: bool = False
-    original_source: str = ""  # for aggregators like JSearch
+    original_source: str = ""  # display label for the preferred/apply source
+    apply_source_key: str = ""  # source key that owns the preferred apply URL
     source_job_id: str = ""
     published_at_raw: str = ""
     published_at_earliest: str = ""
@@ -71,11 +73,31 @@ class Job:
         return ""
 
     @property
-    def display_source(self) -> str:
-        """Get the display name for the source."""
+    def discovery_source_display(self) -> str:
+        """Human label for the source that first owns the cluster/delivery."""
+        configured = config.SOURCE_DISPLAY.get(self.source)
+        if configured:
+            return configured
+        if self.source.startswith("ats_") and self.original_source:
+            return self.original_source
+        return self.source.replace("_", " ").title()
+
+    @property
+    def apply_source_display(self) -> str:
+        """Human label for the source that owns the preferred apply URL."""
         if self.original_source:
             return self.original_source
-        return config.SOURCE_DISPLAY.get(self.source, self.source.title())
+        return config.SOURCE_DISPLAY.get(self.apply_source_key or self.source, self.discovery_source_display)
+
+    @property
+    def apply_is_official(self) -> bool:
+        """Whether the selected apply link is an employer/ATS source."""
+        return is_official_source(self.apply_source_key or self.source)
+
+    @property
+    def display_source(self) -> str:
+        """Backward-compatible alias for the preferred/apply source label."""
+        return self.apply_source_display
 
     @property
     def emoji(self) -> str:

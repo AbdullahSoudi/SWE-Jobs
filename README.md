@@ -376,7 +376,7 @@ save jobs.db to data branch
 
 ## Source Analytics (Shadow Evaluation)
 
-Schema v6 introduced source observations, v7 added persisted source scheduling/health state, v8 added posting-level identity plus conservative cross-source job clustering, and the current schema is v9 with internal description/eligibility evidence fields.
+Schema v6 introduced source observations, v7 added persisted source scheduling/health state, v8 added posting-level identity plus conservative cross-source job clustering, v9 added internal description/eligibility evidence fields, and the current schema is v10 with an explicit `preferred_source_key` for canonical apply-link ownership.
 This lets the bot compare production LinkedIn with `linkedin_saudi_v2` without
 credit depending on which source happened to be processed first. No historical
 source-discovery order is fabricated; observation analytics starts when v6 is deployed.
@@ -418,7 +418,7 @@ Automatic clustering intentionally prefers false splits over false merges. A fuz
 
 Short generic titles such as `QA Engineer` are not fuzzy-merged automatically. Reposts/new requisitions from the same source are also kept separate unless source identity or the canonical URL proves they are the same posting.
 
-When an official ATS posting and a LinkedIn posting cluster together, the delivery/discovery source remains unchanged, but `preferred_url` and `preferred_source` can upgrade to the higher-trust ATS link. This lets Telegram use the official apply URL without breaking shadow-to-production promotion logic.
+When an official ATS posting and a LinkedIn posting cluster together, the delivery/discovery source remains unchanged, but `preferred_url`, `preferred_source`, and `preferred_source_key` can upgrade to the higher-trust ATS link. Trust is centralized in `source_trust.py`: employer ATS feeds outrank LinkedIn, LinkedIn outranks WUZZUF, and discovery-only sources rank below send-capable boards. A lower-trust observation can never downgrade an official apply link. Telegram keeps both facts visible: for example, a role discovered on LinkedIn can show `Apply on official careers` with `Discovered via: LinkedIn · Apply: HALA Careers (official)`. This preserves honest discovery analytics while preferring the safest canonical application link.
 
 The v8 migration backfills exactly one `job_postings` row for every existing job without guessing historical merges; clustering only starts for observations after deployment.
 

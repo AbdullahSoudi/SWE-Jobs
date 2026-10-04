@@ -140,7 +140,8 @@ def format_job_message(job: Job) -> str:
     title = _escape_html(job.title)
     company = _escape_html(job.company) if job.company else "Unknown"
     location = _escape_html(job.location) if job.location else "Not specified"
-    source = _escape_html(job.display_source)
+    discovery_source = _escape_html(job.discovery_source_display)
+    apply_source = _escape_html(job.apply_source_display)
 
     lines = [
         f"{emoji} <b>{title}</b>",
@@ -164,8 +165,17 @@ def format_job_message(job: Job) -> str:
             lines.append("👤 Eligibility: Not specified")
 
     lines.append("")
-    lines.append(f'🔗 <a href="{_escape_html(job.url, quote=True)}">Apply Now</a>')
-    lines.append(f"📡 Source: {source}")
+    apply_label = "Apply on official careers" if job.apply_is_official else "Apply Now"
+    lines.append(f'🔗 <a href="{_escape_html(job.url, quote=True)}">{apply_label}</a>')
+
+    apply_key = (job.apply_source_key or job.source or "").strip().lower()
+    discovery_key = (job.source or "").strip().lower()
+    if job.apply_is_official and apply_key != discovery_key:
+        lines.append(f"📡 Discovered via: {discovery_source} · Apply: {apply_source} (official)")
+    elif job.apply_is_official:
+        lines.append(f"📡 Source: {apply_source} (official)")
+    else:
+        lines.append(f"📡 Source: {apply_source}")
 
     market_tags = _market_hashtags(job)
     if market_tags:
