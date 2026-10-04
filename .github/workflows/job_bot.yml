@@ -54,6 +54,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
           SEED_MODE: ${{ github.event.inputs.seed_mode || 'false' }}
           # Active primary topic Thread IDs (one Telegram post per job)
           TOPIC_GENERAL: ${{ secrets.TOPIC_GENERAL }}

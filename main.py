@@ -30,6 +30,7 @@ from config import (
     SEED_MODE_ENV,
     SOURCE_EMPTY_RUN_WARNING_THRESHOLD,
     SOURCE_FRESHNESS_POLICIES,
+    TELEGRAM_ADMIN_CHAT_ID,
 )
 try:
     from sources import ALL_FETCHERS, SOURCE_POLL_INTERVAL_MINUTES
@@ -59,6 +60,16 @@ from freshness import (
     utc_now,
 )
 from source_analytics import build_source_analytics, format_source_analytics
+from admin_monitoring import (
+    build_daily_digest,
+    digest_due,
+    format_event_batch,
+    health_transition_event,
+    mark_digest_sent,
+    send_admin_message,
+    sync_adapter_outage_events,
+    sync_coverage_gap_event,
+)
 from source_runtime import (
     classify_source_health,
     compute_next_poll_at,
@@ -161,6 +172,7 @@ class RunSummary:
     ambiguous_deliveries_recovered: int = 0
     total_jobs_in_db: int = 0
     seed_mode: bool = False
+    admin_notifications_sent: int = 0
 
 
 def _source_key(value: str) -> str:
@@ -654,6 +666,7 @@ def run_bot(
     run_reference = ensure_utc(reference_time or datetime.now(UTC)).replace(microsecond=0)
     run_at = iso_utc(run_reference)
     summary = RunSummary(seed_mode=_is_seed_mode(seed_mode))
+    admin_events: list[str] = []
     fetcher_list = list(fetchers)
     production_keys = set(PRODUCTION_SOURCE_KEYS if production_source_keys is None else production_source_keys)
     poll_intervals = dict(SOURCE_POLL_INTERVAL_MINUTES)
@@ -750,6 +763,21 @@ def run_bot(
                 previous_state=previous_state,
                 empty_warning_threshold=SOURCE_EMPTY_RUN_WARNING_THRESHOLD,
             )
+            previous_health = (
+                str(previous_state["health_status"] or "UNKNOWN")
+                if previous_state and "health_status" in previous_state.keys()
+                else "UNKNOWN"
+            )
+            health_event = health_transition_event(
+                source_key, previous_health, metrics.health_status, error=metrics.error
+            )
+            if health_event:
+                admin_events.append(health_event)
+            coverage_event = sync_coverage_gap_event(
+                conn, source_key, metrics.coverage_gap
+            )
+            if coverage_event:
+                admin_events.append(coverage_event)
             next_poll_at = compute_next_poll_at(
                 run_at=run_reference,
                 status=metrics.status,
@@ -825,6 +853,7 @@ def run_bot(
         summary.ats_adapter_outages = len(adapter_outages)
         for adapter in adapter_outages:
             log.error("ATS adapter-level outage suspected: %s tenants all failed this run.", adapter)
+        admin_events.extend(sync_adapter_outage_events(conn, adapter_outages))
 
         conn.commit()
 
@@ -879,6 +908,25 @@ def run_bot(
         )
         for line in format_source_analytics(analytics_rows, label="Saudi 24h"):
             log.info(line)
+
+        if TELEGRAM_ADMIN_CHAT_ID:
+            alert_message = format_event_batch(admin_events)
+            if alert_message:
+                alert_result = send_admin_message(alert_message)
+                if alert_result.success:
+                    summary.admin_notifications_sent += 1
+                else:
+                    log.warning("Admin health alert failed: %s", alert_result.error)
+
+            if digest_due(conn, reference_time=run_reference):
+                digest_message = build_daily_digest(conn, reference_time=run_reference)
+                digest_result = send_admin_message(digest_message)
+                if digest_result.success:
+                    mark_digest_sent(conn, reference_time=run_reference)
+                    conn.commit()
+                    summary.admin_notifications_sent += 1
+                else:
+                    log.warning("Admin daily digest failed: %s", digest_result.error)
 
     elapsed = time.time() - start
     log.info(

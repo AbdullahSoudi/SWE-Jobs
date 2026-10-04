@@ -82,6 +82,9 @@ class WorkflowConfigTests(unittest.TestCase):
             with self.subTest(retired=env_name):
                 self.assertNotIn(env_name + ":", self.text)
 
+    def test_optional_admin_chat_secret_is_exposed(self):
+        self.assertIn("TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}", self.text)
+
     def test_disabled_source_api_secrets_are_not_in_workflow(self):
         disabled_envs = [
             "RAPIDAPI_KEY",

@@ -11,6 +11,8 @@ TELEGRAM_GROUP_ID = os.getenv("TELEGRAM_GROUP_ID", "")  # The supergroup chat ID
 TELEGRAM_SEND_DELAY = float(os.getenv("TELEGRAM_SEND_DELAY", "3"))  # per-supergroup minimum interval
 TELEGRAM_REQUEST_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_REQUEST_TIMEOUT_SECONDS", "10"))
 TELEGRAM_MAX_INLINE_RETRIES = int(os.getenv("TELEGRAM_MAX_INLINE_RETRIES", "2"))
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")  # optional private admin chat
+ADMIN_DIGEST_INTERVAL_HOURS = int(os.getenv("ADMIN_DIGEST_INTERVAL_HOURS", "24"))
 
 # ─── Active Telegram Topics ──────────────────────────────────
 # Update 5 uses exactly ONE primary topic per job.  Market/source information

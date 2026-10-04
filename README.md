@@ -13,6 +13,7 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
 - **Per-source run history:** fetch counts, freshness outcomes, failures, duration, shadow yield, coverage gaps, and health status are stored for later source scoring.
+- **Optional private admin monitoring:** health transitions and a compact 24-hour digest can be sent to a separate admin chat without adding public topics or messages.
 - **Per-source scheduling:** the workflow still wakes every 15 minutes, but individual ATS tenants persist `next_poll_at` and can run every 30–60 minutes without wasting requests.
 - **SQLite state:** jobs, source postings, source state, freshness evidence, delivery state, and delivery attempts live in `jobs.db`.
 - **Durable Telegram outbox:** delivery state is written before the network call.
@@ -174,6 +175,12 @@ coverage_gap / shadow_mode
 
 This supports measured source promotion rather than enabling a new feed on intuition alone. `source_observations` and `source_analytics.py` now provide first-discovery, lead-time, and mature 24-hour exclusive metrics for sources that observe the same clustered real-world opening.
 
+## Optional Admin Monitoring
+
+Operational alerts should not become another public topic. If `TELEGRAM_ADMIN_CHAT_ID` is configured, the bot can send a private/admin-chat notification only when a source crosses into `DEGRADED`/`UNHEALTHY`, recovers, starts/clears a freshness coverage gap, or a shared ATS adapter outage appears/recovers. Repeated runs in the same state are suppressed.
+
+A digest is sent at most once per `ADMIN_DIGEST_INTERVAL_HOURS` (default `24`) and summarizes source health, 24-hour fetch/relevance/fresh/shadow counts, Telegram delivery outcomes, Saudi LinkedIn-vs-V2 discovery metrics, and the top shadow candidates. The last successful digest timestamp and active alert states are persisted in SQLite metadata, so GitHub Actions restarts do not reset alert suppression.
+
 ## Telegram Topics
 
 Update 5 uses **one primary topic per job**. A job is no longer copied to General + role + country + source topics.
@@ -219,6 +226,14 @@ Core secrets:
 TELEGRAM_BOT_TOKEN
 TELEGRAM_GROUP_ID
 ```
+
+Optional private monitoring secret:
+
+```text
+TELEGRAM_ADMIN_CHAT_ID
+```
+
+When set, the bot sends health transitions and one compact digest roughly every 24 hours to that separate chat. If it is absent, monitoring stays in GitHub Actions logs only and public Telegram behaviour is unchanged.
 
 Active topic secrets:
 
@@ -490,6 +505,7 @@ python main.py
 ├── dedup.py
 ├── source_analytics.py
 ├── source_runtime.py
+├── admin_monitoring.py
 ├── company_registry.py
 ├── ats_detector.py
 ├── telegram_sender.py
@@ -508,6 +524,7 @@ python main.py
 │   ├── linkedin_saudi_v2.py
 │   └── jobzaty.py
 ├── tests/
+│   ├── test_admin_monitoring.py
 │   ├── test_ats.py
 │   ├── test_ats_detector.py
 │   ├── test_company_registry.py
