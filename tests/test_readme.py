@@ -37,6 +37,14 @@ class ReadmeDocumentationTests(unittest.TestCase):
         self.assertIn("concurrency", self.text)
         self.assertIn("data branch", self.text)
 
+    def test_readme_documents_vps_runtime(self):
+        self.assertIn("VPS Production Runtime", self.text)
+        self.assertIn("JOBS_DB_PATH", self.text)
+        self.assertIn("SQLITE_JOURNAL_MODE=WAL", self.text)
+        self.assertIn("VPS_PRODUCTION=true", self.text)
+        self.assertIn("backup_sqlite.py", self.text)
+        self.assertIn("swe-jobs.timer", self.text)
+
     def test_readme_no_longer_claims_old_runtime(self):
         forbidden_claims = [
             "15 free sources",
@@ -68,6 +76,9 @@ class ReadmeDocumentationTests(unittest.TestCase):
             "test_telegram_sender.py",
             "test_workflow.py",
             "test_wuzzuf.py",
+            "test_vps_runtime.py",
+            "test_backup_sqlite.py",
+            "test_vps_deploy.py",
         ]:
             with self.subTest(test_file=test_file):
                 self.assertIn(test_file, self.text)

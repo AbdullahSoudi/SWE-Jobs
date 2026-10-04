@@ -1,5 +1,8 @@
+import os
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -69,6 +72,25 @@ class DatabaseMaintenanceTests(unittest.TestCase):
                 self.assertEqual(conn.execute('SELECT COUNT(*) FROM source_run_history').fetchone()[0], 1)
                 marker = conn.execute('SELECT value FROM metadata WHERE key=?', (LAST_COMPACT_METADATA_KEY,)).fetchone()
                 self.assertIsNotNone(marker)
+
+
+    def test_compaction_supports_wal_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"SQLITE_JOURNAL_MODE": "WAL"}
+        ):
+            db_path = Path(tmp) / "jobs.db"
+            now = datetime(2026, 10, 4, 20, 0, tzinfo=UTC)
+            with connect(db_path) as conn:
+                upsert_job(conn, Job('Platform Engineer', 'Co', 'Riyadh', 'https://x.test/wal', 'linkedin'))
+                self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0].lower(), 'wal')
+
+            result = compact_database(db_path, reference_time=now, force=True)
+            self.assertTrue(result.ran)
+            raw = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(raw.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+            finally:
+                raw.close()
 
     def test_small_recent_database_does_not_vacuum_again_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:

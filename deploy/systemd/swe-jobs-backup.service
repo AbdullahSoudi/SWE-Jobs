@@ -1,0 +1,20 @@
+[Unit]
+Description=Back up SWE Jobs SQLite database
+After=swe-jobs.service
+
+[Service]
+Type=oneshot
+User=swejobs
+Group=swejobs
+WorkingDirectory=/opt/swe-jobs/current
+EnvironmentFile=/etc/swe-jobs/swe-jobs.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+StateDirectory=swe-jobs
+StateDirectoryMode=0750
+ExecStart=/opt/swe-jobs/venv/bin/python /opt/swe-jobs/current/ops/backup_sqlite.py
+TimeoutStartSec=10min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/swe-jobs /var/backups/swe-jobs

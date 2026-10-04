@@ -21,7 +21,7 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Market/source as metadata:** Egypt/Saudi/Remote and the source are shown in the message instead of creating duplicate topic posts.
 - **Evidence-based Saudi eligibility:** explicit Saudi-only/open-to-non-Saudi text is extracted from available job descriptions; silence stays `NOT_SPECIFIED`.
 - **Telegram backpressure:** rate limiting, `retry_after`, bounded transient retries, and ambiguous-timeout protection.
-- **GitHub Actions:** requests a 15-minute schedule and persists `jobs.db` on the `data` branch. GitHub scheduled runs are best-effort, so coverage-gap metrics remain authoritative.
+- **Runtime:** GitHub Actions remains available, but a persistent Linux VPS is now the recommended production scheduler. The VPS uses a systemd timer every 15 minutes, SQLite WAL, a single-instance lock, and daily verified backups. GitHub scheduled runs can be disabled after cutover with the repository variable `VPS_PRODUCTION=true`.
 
 ## Sources
 
@@ -455,9 +455,47 @@ Schedule:
 every 15 minutes
 ```
 
-The workflow has a `concurrency` group with `cancel-in-progress: false`, restores SQLite from the `data` branch, runs `main.py`, and writes the updated database back.
+The workflow has a `concurrency` group with `cancel-in-progress: false`, restores SQLite from the `data` branch, runs `main.py`, and writes the updated database back. GitHub scheduled execution is best-effort and has shown multi-hour gaps in production, so it is no longer the recommended freshness-critical scheduler.
 
-Git-backed SQLite is still the current persistence mechanism. The longer-term architecture may move the bot to a persistent host while keeping SQLite.
+At VPS cutover, set the GitHub repository variable `VPS_PRODUCTION=true`. Scheduled Actions jobs will then skip the bot. Manual `workflow_dispatch` remains available, but the workflow forces those runs into seed mode while the VPS owns production so a stale data-branch copy cannot double-send Telegram jobs. Do not run two independent production SQLite copies.
+
+## VPS Production Runtime
+
+The repository includes a persistent-host deployment under `deploy/`:
+
+```text
+deploy/
+├── install_systemd.sh
+├── swe-jobs.env.example
+└── systemd/
+    ├── swe-jobs.service
+    ├── swe-jobs.timer
+    ├── swe-jobs-backup.service
+    └── swe-jobs-backup.timer
+```
+
+The recommended Linux layout is:
+
+- code: `/opt/swe-jobs/current`
+- virtualenv: `/opt/swe-jobs/venv`
+- configuration/secrets: `/etc/swe-jobs/swe-jobs.env`
+- persistent SQLite state: `/var/lib/swe-jobs/jobs.db`
+- runtime lock: `/run/swe-jobs/run.lock`
+- compressed backups: `/var/backups/swe-jobs/`
+
+`JOBS_DB_PATH` makes SQLite independent from the code checkout. `SQLITE_JOURNAL_MODE=WAL` enables WAL only on the persistent host; GitHub Actions continues to use the default `DELETE` journal mode so its data branch remains a single-file snapshot. The VPS connection also uses `synchronous=NORMAL`, `busy_timeout=5000`, and WAL auto-checkpointing.
+
+`vps_runner.py` takes a non-blocking process lock before calling the normal `run_bot()` path. If another run is still active, the next timer tick exits successfully instead of overlapping it. The systemd timer uses `OnCalendar=*:0/15`, `Persistent=true`, and `AccuracySec=5s`.
+
+Daily backups use SQLite's online backup API rather than copying a live WAL database. `ops/backup_sqlite.py` creates a consistent snapshot, runs `PRAGMA integrity_check`, gzip-compresses it, writes it atomically, and removes backups older than `BACKUP_RETENTION_DAYS` (default 14).
+
+### VPS bootstrap and cutover
+
+On the VPS, clone the repository to `/opt/swe-jobs/current`, then run `sudo bash deploy/install_systemd.sh`. The installer creates the `swejobs` system user, persistent directories, virtualenv, environment file, and systemd units. On a fresh host it also attempts a one-time import of the current `origin/data:jobs.db`, preserving the existing dedup/history state.
+
+Before cutover, fill `/etc/swe-jobs/swe-jobs.env` with the same Telegram token/group/topic IDs used by GitHub. Then set `VPS_PRODUCTION=true` in GitHub immediately before the first non-seed VPS run so scheduled Actions stop first. Test with `systemctl start swe-jobs.service` and inspect `journalctl -u swe-jobs.service`. If it fails, set `VPS_PRODUCTION=false` to roll back to GitHub. If it succeeds, enable `swe-jobs.timer` and `swe-jobs-backup.timer`.
+
+The deployment templates intentionally do not contain real secrets.
 
 ## Seed Mode
 
@@ -505,6 +543,14 @@ python main.py
 ├── models.py
 ├── db.py
 ├── db_maintenance.py
+├── runtime_lock.py
+├── vps_runner.py
+├── ops/
+│   └── backup_sqlite.py
+├── deploy/
+│   ├── install_systemd.sh
+│   ├── swe-jobs.env.example
+│   └── systemd/
 ├── freshness.py
 ├── eligibility.py
 ├── dedup.py
@@ -548,7 +594,10 @@ python main.py
 │   ├── test_sources_registry.py
 │   ├── test_telegram_sender.py
 │   ├── test_workflow.py
-│   └── test_wuzzuf.py
+│   ├── test_wuzzuf.py
+│   ├── test_vps_runtime.py
+│   ├── test_backup_sqlite.py
+│   └── test_vps_deploy.py
 └── .github/workflows/
     └── job_bot.yml
 ```

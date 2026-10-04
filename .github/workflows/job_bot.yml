@@ -23,6 +23,10 @@ concurrency:
 
 jobs:
   run-bot:
+    # After VPS cutover set repository variable VPS_PRODUCTION=true. Scheduled
+    # GitHub runs then stop, while workflow_dispatch remains available for
+    # diagnostics or one-off seed runs.
+    if: github.event_name == 'workflow_dispatch' || vars.VPS_PRODUCTION != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -58,7 +62,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
           TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
-          SEED_MODE: ${{ github.event.inputs.seed_mode || 'false' }}
+          # Once VPS is production, manual Actions runs are forced to seed mode
+          # so a stale data-branch copy can never double-send Telegram jobs.
+          SEED_MODE: ${{ vars.VPS_PRODUCTION == 'true' && 'true' || (github.event.inputs.seed_mode || 'false') }}
           # Active primary topic Thread IDs (one Telegram post per job)
           TOPIC_GENERAL: ${{ secrets.TOPIC_GENERAL }}
           TOPIC_BACKEND: ${{ secrets.TOPIC_BACKEND }}

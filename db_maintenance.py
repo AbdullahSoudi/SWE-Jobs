@@ -157,6 +157,10 @@ def compact_database(
 
         # VACUUM is deliberately infrequent (weekly unless the file is large).
         conn.execute("VACUUM")
+        journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if journal_mode == "wal":
+            # Keep the persistent-host WAL sidecar bounded after maintenance.
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         _set_metadata(conn, LAST_COMPACT_METADATA_KEY, _iso(now))
         conn.commit()
     finally:

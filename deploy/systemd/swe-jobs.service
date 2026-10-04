@@ -1,0 +1,26 @@
+[Unit]
+Description=SWE Jobs Telegram Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=swejobs
+Group=swejobs
+WorkingDirectory=/opt/swe-jobs/current
+EnvironmentFile=/etc/swe-jobs/swe-jobs.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+RuntimeDirectory=swe-jobs
+RuntimeDirectoryMode=0750
+StateDirectory=swe-jobs
+StateDirectoryMode=0750
+ExecStart=/opt/swe-jobs/venv/bin/python /opt/swe-jobs/current/vps_runner.py
+TimeoutStartSec=12min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/swe-jobs /run/swe-jobs
+
+[Install]
+WantedBy=multi-user.target

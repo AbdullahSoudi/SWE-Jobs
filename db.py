@@ -9,6 +9,7 @@ single SQLite file that can be committed to the GitHub Actions data branch.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import re
 import sqlite3
@@ -22,7 +23,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from models import Job
 from dedup import find_cross_source_match, source_trust
 
-DB_FILE = "jobs.db"
+DB_FILE = os.getenv("JOBS_DB_PATH", "jobs.db")
 SCHEMA_VERSION = 10
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
@@ -108,8 +109,16 @@ class StoredJob:
 
 @contextmanager
 def connect(db_path: str | Path = DB_FILE) -> Iterator[sqlite3.Connection]:
-    """Open a SQLite connection and ensure schema exists."""
-    conn = sqlite3.connect(str(db_path))
+    """Open a SQLite connection and ensure schema exists.
+
+    ``JOBS_DB_PATH`` lets a persistent host keep state outside the code checkout.
+    Parent directories are created when possible so a configured application
+    state directory (for example ``/var/lib/swe-jobs``) can be used directly.
+    """
+    path = Path(db_path)
+    if path.parent != Path("."):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     try:
         _configure_connection(conn)
@@ -123,12 +132,33 @@ def connect(db_path: str | Path = DB_FILE) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def configured_journal_mode() -> str:
+    """Return the configured SQLite journal mode.
+
+    GitHub Actions keeps DELETE mode so the data branch persists one file.
+    Persistent Linux hosts should set ``SQLITE_JOURNAL_MODE=WAL``.
+    """
+    mode = os.getenv("SQLITE_JOURNAL_MODE", "DELETE").strip().upper() or "DELETE"
+    if mode not in {"DELETE", "WAL"}:
+        raise ValueError("SQLITE_JOURNAL_MODE must be DELETE or WAL")
+    return mode
+
+
 def _configure_connection(conn: sqlite3.Connection) -> None:
-    """Apply safe defaults for small single-file bot storage."""
+    """Apply SQLite settings appropriate to the selected runtime host."""
     conn.execute("PRAGMA foreign_keys = ON")
-    # Keep the database as one commit-friendly file for GitHub Actions.
-    # WAL mode creates sidecar -wal/-shm files that are easy to forget on the data branch.
-    conn.execute("PRAGMA journal_mode = DELETE")
+    mode = configured_journal_mode()
+    actual = str(conn.execute(f"PRAGMA journal_mode = {mode}").fetchone()[0]).upper()
+    if actual != mode:
+        raise RuntimeError(f"SQLite could not enable journal_mode={mode}; got {actual}")
+    if mode == "WAL":
+        # NORMAL is the standard durability/performance balance for WAL on a
+        # persistent host.  The database still survives process restarts while
+        # avoiding an fsync for every small metadata write.
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA wal_autocheckpoint = 1000")
+    else:
+        conn.execute("PRAGMA synchronous = FULL")
     conn.execute("PRAGMA busy_timeout = 5000")
 
 

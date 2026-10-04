@@ -48,7 +48,8 @@ class WorkflowConfigTests(unittest.TestCase):
     def test_manual_seed_mode_input_is_available(self):
         self.assertIn("seed_mode:", self.text)
         self.assertIn("Store fetched jobs without sending them", self.text)
-        self.assertIn("SEED_MODE: ${{ github.event.inputs.seed_mode || 'false' }}", self.text)
+        self.assertIn("github.event.inputs.seed_mode || 'false'", self.text)
+        self.assertIn("SEED_MODE:", self.text)
 
     def test_runtime_env_has_only_active_topic_secrets(self):
         required_envs = [
@@ -110,6 +111,14 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_workflow_still_runs_main_py(self):
         self.assertIn("run: python main.py", self.text)
+
+    def test_vps_cutover_disables_scheduled_github_production(self):
+        self.assertIn("vars.VPS_PRODUCTION != 'true'", self.text)
+        self.assertIn("github.event_name == 'workflow_dispatch'", self.text)
+
+    def test_manual_actions_are_forced_to_seed_after_vps_cutover(self):
+        self.assertIn("vars.VPS_PRODUCTION == 'true'", self.text)
+        self.assertIn("&& 'true'", self.text)
 
 
 if __name__ == "__main__":

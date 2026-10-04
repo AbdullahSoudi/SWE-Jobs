@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# Runtime state is persisted outside the main branch / code checkout.
+jobs.db*
+backups/

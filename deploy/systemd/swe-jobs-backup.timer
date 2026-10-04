@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily backup for SWE Jobs SQLite database
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+AccuracySec=1min
+Persistent=true
+Unit=swe-jobs-backup.service
+
+[Install]
+WantedBy=timers.target

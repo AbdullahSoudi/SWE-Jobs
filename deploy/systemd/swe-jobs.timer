@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SWE Jobs every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+AccuracySec=5s
+Persistent=true
+Unit=swe-jobs.service
+
+[Install]
+WantedBy=timers.target
