@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Callable, Iterable
 
 from config import (
+    ATS_OBSERVATION_MAX_AGE_MINUTES,
     DEFAULT_SOURCE_FRESHNESS_POLICY,
     LEGACY_BACKLOG_MAX_AGE_MINUTES,
     MAX_JOBS_PER_RUN,
@@ -218,7 +219,7 @@ def should_keep_job(job: Job) -> bool:
         return False
 
     source = _source_key(job.source)
-    if source in {"linkedin", "linkedin_saudi_v2"}:
+    if source in {"linkedin", "linkedin_saudi_v2"} or source.startswith("ats_"):
         return is_tech_job(job) and passes_geo_filter(job)
 
     return is_programming_job(job) and passes_geo_filter(job)
@@ -241,7 +242,13 @@ def _publication_evidence(job: Job) -> PublicationEvidence:
 
 
 def _policy_for_source(source_key: str) -> dict[str, object]:
-    policy = SOURCE_FRESHNESS_POLICIES.get(source_key, DEFAULT_SOURCE_FRESHNESS_POLICY)
+    key = _source_key(source_key)
+    if key.startswith("ats_"):
+        return {
+            "max_age_seconds": ATS_OBSERVATION_MAX_AGE_MINUTES * 60,
+            "uncertain_fallback": "RECENT_OBSERVATION",
+        }
+    policy = SOURCE_FRESHNESS_POLICIES.get(key, DEFAULT_SOURCE_FRESHNESS_POLICY)
     return dict(policy)
 
 

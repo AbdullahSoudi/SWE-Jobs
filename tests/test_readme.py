@@ -10,12 +10,16 @@ class ReadmeDocumentationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.text = README.read_text(encoding="utf-8")
 
-    def test_readme_documents_new_two_source_design(self):
+    def test_readme_documents_current_source_design(self):
         self.assertIn("WUZZUF", self.text)
         self.assertIn("LinkedIn", self.text)
         self.assertIn("ALL_FETCHERS", self.text)
         self.assertIn("jobs.db", self.text)
         self.assertIn("SQLite", self.text)
+        self.assertIn("Greenhouse", self.text)
+        self.assertIn("Lever", self.text)
+        self.assertIn("Ashby", self.text)
+        self.assertIn("companies/saudi_ats.json", self.text)
 
     def test_readme_documents_single_primary_topic_design(self):
         self.assertIn("one primary topic", self.text.lower())
@@ -43,11 +47,14 @@ class ReadmeDocumentationTests(unittest.TestCase):
 
     def test_readme_lists_current_tests(self):
         for test_file in [
+            "test_ats.py",
+            "test_company_registry.py",
             "test_db.py",
             "test_freshness.py",
             "test_linkedin.py",
             "test_main_sqlite.py",
             "test_routing.py",
+            "test_source_analytics.py",
             "test_sources_registry.py",
             "test_telegram_sender.py",
             "test_workflow.py",

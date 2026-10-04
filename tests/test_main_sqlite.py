@@ -817,3 +817,71 @@ class ShadowPromotionTests(unittest.TestCase):
                 row = conn.execute("SELECT source, send_status FROM jobs").fetchone()
                 self.assertEqual(row["source"], "linkedin")
                 self.assertEqual(row["send_status"], "sent")
+
+
+class ATSSnapshotShadowFlowTests(unittest.TestCase):
+    def test_ats_snapshot_source_baselines_then_marks_new_tech_job_shadow_without_sending(self):
+        now = datetime.now(UTC).replace(microsecond=0)
+        baseline_job = Job(
+            title="Backend Engineer",
+            company="HALA",
+            location="Riyadh, Saudi Arabia",
+            url="https://job-boards.greenhouse.io/hala/jobs/1",
+            source="ats_greenhouse_hala",
+            source_job_id="1",
+            original_source="HALA Careers",
+        )
+        fresh_job = Job(
+            title="Site Reliability Engineer",
+            company="HALA",
+            location="Riyadh, Saudi Arabia",
+            url="https://job-boards.greenhouse.io/hala/jobs/2",
+            source="ats_greenhouse_hala",
+            source_job_id="2",
+            original_source="HALA Careers",
+        )
+        sent = []
+
+        def sender(job_obj, topics):
+            sent.append(job_obj.title)
+            return {topic: True for topic in topics}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            first = main.run_bot(
+                db_path=db_path,
+                fetchers=[("ATS Greenhouse hala", lambda: [baseline_job])],
+                sender=sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=now,
+            )
+            self.assertEqual(first.baseline_skipped_jobs, 1)
+            self.assertEqual(sent, [])
+
+            second = main.run_bot(
+                db_path=db_path,
+                fetchers=[("ATS Greenhouse hala", lambda: [baseline_job, fresh_job])],
+                sender=sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=now + timedelta(minutes=15),
+            )
+            self.assertEqual(second.fresh_new_jobs, 1)
+            self.assertEqual(second.shadow_eligible_jobs, 1)
+            self.assertEqual(second.topic_send_successes, 0)
+            self.assertEqual(sent, [])
+
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status, freshness_reason FROM jobs WHERE url = ?",
+                    (fresh_job.url,),
+                ).fetchone()
+                self.assertEqual(row["send_status"], "shadow")
+                self.assertEqual(row["freshness_reason"], "recent_observation_after_success")
+
+
+if __name__ == "__main__":
+    unittest.main()

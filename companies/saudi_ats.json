@@ -1,0 +1,47 @@
+[
+  {
+    "key": "hala",
+    "company": "HALA",
+    "ats": "greenhouse",
+    "tenant": "hala",
+    "country": "SA",
+    "careers_url": "https://job-boards.greenhouse.io/hala",
+    "enabled": true
+  },
+  {
+    "key": "minio",
+    "company": "MinIO",
+    "ats": "greenhouse",
+    "tenant": "minio",
+    "country": "SA",
+    "careers_url": "https://job-boards.greenhouse.io/minio",
+    "enabled": true
+  },
+  {
+    "key": "soum",
+    "company": "SOUM",
+    "ats": "lever",
+    "tenant": "soum",
+    "country": "SA",
+    "careers_url": "https://jobs.lever.co/soum",
+    "enabled": true
+  },
+  {
+    "key": "sarjai",
+    "company": "Sarj.ai",
+    "ats": "ashby",
+    "tenant": "sarjai",
+    "country": "SA",
+    "careers_url": "https://jobs.ashbyhq.com/sarjai",
+    "enabled": true
+  },
+  {
+    "key": "echelon",
+    "company": "Echelon",
+    "ats": "ashby",
+    "tenant": "echeloncareers",
+    "country": "SA",
+    "careers_url": "https://jobs.ashbyhq.com/echeloncareers",
+    "enabled": true
+  }
+]

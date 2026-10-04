@@ -1,12 +1,7 @@
-"""
-Source registry — maps enabled source names to their fetch functions.
+"""Source registry for production and shadow job feeds.
 
-The bot is intentionally narrowed to quality-first monitoring:
-- WUZZUF: primary Egypt source.
-- LinkedIn: fresh public search cards only, limited and high-risk.
-
-Old sources remain in the repository for reference/migration, but they are not
-registered here and therefore will not run.
+Production sources remain WUZZUF and LinkedIn. Saudi LinkedIn V2 and every ATS
+company feed are shadow by default until measured data justifies promotion.
 """
 
 try:  # final project layout: sources/__init__.py
@@ -18,11 +13,14 @@ except ModuleNotFoundError:  # local flat-file test layout
     from linkedin import fetch_linkedin
     from linkedin_saudi_v2 import fetch_linkedin_saudi_v2
 
-# (display_name, fetch_function)
-ALL_FETCHERS = [
+from company_registry import build_ats_fetchers
+
+CORE_FETCHERS = [
     ("WUZZUF", fetch_wuzzuf),
     ("LinkedIn", fetch_linkedin),
     ("LinkedIn Saudi V2", fetch_linkedin_saudi_v2),
 ]
 
+ATS_FETCHERS = build_ats_fetchers()
+ALL_FETCHERS = CORE_FETCHERS + ATS_FETCHERS
 ENABLED_SOURCE_NAMES = tuple(name for name, _ in ALL_FETCHERS)

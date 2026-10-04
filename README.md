@@ -8,7 +8,7 @@ The product goal is a real-time job feed, not a historical job archive:
 
 ## Current Design
 
-- **Sources:** WUZZUF + production LinkedIn, plus a shadow-only Saudi LinkedIn V2 strategy for measured comparison.
+- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2 and a small shadow ATS company registry (Greenhouse, Lever, Ashby).
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
@@ -22,24 +22,38 @@ The product goal is a real-time job feed, not a historical job archive:
 
 ## Sources
 
-Enabled sources are defined in `sources/__init__.py`:
-
-```python
-ALL_FETCHERS = [
-    ("WUZZUF", fetch_wuzzuf),
-    ("LinkedIn", fetch_linkedin),
-    ("LinkedIn Saudi V2", fetch_linkedin_saudi_v2),  # shadow
-]
-```
+Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core feeds are static, while Saudi ATS company feeds are generated from `companies/saudi_ats.json`.
 
 | Source | Status | Notes |
 |---|---|---|
-| WUZZUF | Enabled | Public category/search cards; mainly Egypt |
+| WUZZUF | Production | Public category/search cards; mainly Egypt |
 | LinkedIn | Production | Existing public guest search strategy |
-| LinkedIn Saudi V2 | Shadow | Saudi `geoId=100459316`, broad country search + ERP/business-systems gap fillers; never sends yet |
-| Legacy sources | Disabled | Not registered at runtime |
+| LinkedIn Saudi V2 | Shadow | Saudi `geoId=100459316`, broad country search + ERP/business-systems gap fillers |
+| HALA | Shadow ATS | Greenhouse public job board |
+| MinIO | Shadow ATS | Greenhouse public job board, Saudi rows only |
+| SOUM | Shadow ATS | Lever public postings API |
+| Sarj.ai | Shadow ATS | Ashby public job posting API |
+| Echelon | Shadow ATS | Ashby public job posting API |
+| Legacy aggregators | Disabled | Not registered at runtime |
 
-LinkedIn is intentionally treated as a fragile source. The bot does not log in, access profiles, collect member data, or scrape full descriptions.
+All ATS feeds are shadow by default because their generated source keys are not in `PRODUCTION_SOURCE_KEYS`. Their first successful fetch establishes a no-send baseline, then later newly observed jobs can be measured without Telegram delivery.
+
+### Saudi ATS company registry
+
+The first registry is deliberately small:
+
+```text
+companies/saudi_ats.json
+├── HALA       → Greenhouse
+├── MinIO      → Greenhouse
+├── SOUM       → Lever
+├── Sarj.ai    → Ashby
+└── Echelon    → Ashby
+```
+
+`company_registry.py` validates the registry and builds one source fetcher per employer. This gives each company its own source health/freshness/observation metrics instead of hiding all ATS traffic behind one aggregate source.
+
+The adapters live in `sources/ats.py` and use public job-board read endpoints only. Greenhouse and Lever are treated as snapshot feeds when they do not expose a reliable publication time. Ashby preserves its `publishedAt` timestamp. Global company boards are filtered to explicit Saudi locations before the tech classifier runs, so a global remote role is not accepted merely because the employer is in the Saudi registry.
 
 ### Saudi LinkedIn V2 shadow experiment
 
@@ -87,7 +101,7 @@ coverage_gap / shadow_mode
 
 `source_runs` also keeps the latest health snapshot and consecutive failure/empty-run counters. A warning is logged after repeated successful zero-result fetches.
 
-This is the foundation for evaluating future Saudi sources in shadow mode before enabling them. Cross-source exclusive yield and lead-time scoring will be added after the dedup/cluster layer exists; this update intentionally does not invent those metrics yet.
+This supports measured source promotion rather than enabling a new feed on intuition alone. `source_observations` and `source_analytics.py` now provide first-discovery, lead-time, and mature 24-hour exclusive metrics for sources that observe the same normalized job.
 
 ## Telegram Topics
 
@@ -204,6 +218,7 @@ A source's first successful fetch is a **baseline** and never floods Telegram wi
 ```text
 LINKEDIN_FRESHNESS_SECONDS=3600
 WUZZUF_OBSERVATION_MAX_AGE_MINUTES=60
+ATS_OBSERVATION_MAX_AGE_MINUTES=120
 PENDING_SEND_MAX_AGE_MINUTES=60
 ```
 
@@ -262,7 +277,7 @@ GitHub Actions
     ↓
 restore jobs.db from data branch
     ↓
-fetch WUZZUF + LinkedIn
+fetch WUZZUF + LinkedIn + shadow Saudi ATS feeds
     ↓
 quality + geography filtering
     ↓
@@ -379,22 +394,30 @@ python main.py
 ├── db.py
 ├── freshness.py
 ├── source_analytics.py
+├── company_registry.py
 ├── telegram_sender.py
 ├── cleanup.py
 ├── requirements.txt
 ├── README.md
+├── companies/
+│   └── saudi_ats.json
 ├── sources/
 │   ├── __init__.py
+│   ├── ats.py
 │   ├── http_utils.py
 │   ├── wuzzuf.py
-│   └── linkedin.py
+│   ├── linkedin.py
+│   └── linkedin_saudi_v2.py
 ├── tests/
+│   ├── test_ats.py
+│   ├── test_company_registry.py
 │   ├── test_db.py
 │   ├── test_freshness.py
 │   ├── test_linkedin.py
 │   ├── test_main_sqlite.py
 │   ├── test_readme.py
 │   ├── test_routing.py
+│   ├── test_source_analytics.py
 │   ├── test_sources_registry.py
 │   ├── test_telegram_sender.py
 │   ├── test_workflow.py
@@ -410,5 +433,6 @@ python main.py
 - A missing active topic secret causes `CONFIG_ERROR` for jobs assigned to that topic.
 - Old Telegram topics do not need to be deleted immediately; they simply stop receiving new jobs.
 - Do not publish full job descriptions in the group; cards intentionally stay compact.
-- LinkedIn remains a fragile dependency, which is why Saudi source diversification and ATS/company feeds are planned next.
-- New Saudi sources should be added to the fetch registry first, observed in shadow mode, and promoted only after their freshness/relevance/reliability metrics look healthy.
+- LinkedIn remains a fragile dependency; Saudi ATS/company feeds now provide the first diversification layer.
+- New Saudi sources should be added to the registry/fetch layer first, observed in shadow mode, and promoted only after their freshness/relevance/reliability/lead-time metrics look healthy.
+- Keep the ATS registry small and evidence-driven. Add employers because current data shows useful Saudi tech hiring, not simply to maximize company count.
