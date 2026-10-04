@@ -5,19 +5,82 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from models import Job
-from telegram_sender import route_job
-from config import CHANNELS
+from telegram_sender import format_job_message, route_job
+from config import CHANNELS, PRIMARY_TOPIC_ORDER
 
 
 class TelegramRoutingTests(unittest.TestCase):
-    def test_linkedin_all_channel_is_configured(self):
-        channel = CHANNELS.get("linkedin_all")
-        self.assertIsInstance(channel, dict)
-        self.assertEqual(channel.get("thread_env"), "TOPIC_LINKEDIN_ALL")
-        self.assertEqual(channel.get("match"), "SOURCE_LINKEDIN")
-        self.assertIn("LinkedIn", channel.get("name", ""))
+    def test_only_compact_primary_topics_are_active(self):
+        self.assertEqual(
+            set(CHANNELS),
+            {
+                "general",
+                "backend",
+                "frontend",
+                "mobile",
+                "devops",
+                "qa",
+                "ai_ml",
+                "cybersecurity",
+                "internships",
+                "erp",
+            },
+        )
+        self.assertNotIn("linkedin_all", CHANNELS)
+        self.assertNotIn("egypt", CHANNELS)
+        self.assertNotIn("saudi", CHANNELS)
 
-    def test_any_linkedin_job_routes_to_linkedin_all_even_without_category_match(self):
+    def test_priority_order_contains_only_specific_topics(self):
+        self.assertNotIn("general", PRIMARY_TOPIC_ORDER)
+        self.assertEqual(PRIMARY_TOPIC_ORDER[0], "internships")
+        self.assertTrue(set(PRIMARY_TOPIC_ORDER).issubset(CHANNELS))
+
+    def test_backend_job_routes_once_even_when_linkedin_and_in_egypt(self):
+        job = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://www.linkedin.com/jobs/view/1234567890",
+            source="linkedin",
+            tags=["Python"],
+        )
+        self.assertEqual(route_job(job), ["backend"])
+
+    def test_internship_wins_over_role_to_avoid_cross_posting(self):
+        job = Job(
+            title="Backend Developer Intern",
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url="https://example.com/intern",
+            source="wuzzuf",
+            tags=[".NET"],
+        )
+        self.assertEqual(route_job(job), ["internships"])
+
+    def test_data_engineering_is_merged_into_data_and_ai(self):
+        job = Job(
+            title="Data Engineer",
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url="https://example.com/data",
+            source="linkedin",
+            tags=["Airflow", "dbt"],
+        )
+        self.assertEqual(route_job(job), ["ai_ml"])
+        self.assertEqual(CHANNELS["ai_ml"]["name"], "🤖 Data & AI")
+
+    def test_generic_tech_role_uses_general_fallback(self):
+        job = Job(
+            title="Software Engineer",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://example.com/swe",
+            source="linkedin",
+            tags=[],
+        )
+        self.assertEqual(route_job(job), ["general"])
+
+    def test_unrelated_linkedin_role_is_not_kept_just_for_its_source(self):
         job = Job(
             title="People Operations Coordinator",
             company="Acme",
@@ -25,56 +88,21 @@ class TelegramRoutingTests(unittest.TestCase):
             url="https://www.linkedin.com/jobs/view/1234567890",
             source="linkedin",
             tags=[],
-            is_remote=False,
         )
-        routed = route_job(job)
-        self.assertIn("linkedin_all", routed)
-        # This confirms the special LinkedIn topic is source-based, not category-based.
-        self.assertNotIn("backend", routed)
-        self.assertNotIn("frontend", routed)
+        self.assertEqual(route_job(job), [])
 
-    def test_linkedin_job_still_keeps_normal_category_routing(self):
+    def test_market_is_metadata_not_an_extra_topic(self):
         job = Job(
             title="Backend Developer",
             company="Acme",
-            location="Cairo, Egypt",
-            url="https://www.linkedin.com/jobs/view/1234567890",
+            location="Riyadh, Saudi Arabia",
+            url="https://example.com/backend",
             source="linkedin",
-            tags=[],
-            is_remote=False,
         )
-        routed = route_job(job)
-        self.assertIn("linkedin_all", routed)
-        self.assertIn("backend", routed)
-        self.assertIn("egypt", routed)
-        self.assertIn("general", routed)
-
-    def test_non_linkedin_job_does_not_route_to_linkedin_all(self):
-        job = Job(
-            title="Backend Developer",
-            company="Acme",
-            location="Cairo, Egypt",
-            url="https://wuzzuf.net/jobs/p/test",
-            source="wuzzuf",
-            tags=[],
-            is_remote=False,
-        )
-        routed = route_job(job)
-        self.assertNotIn("linkedin_all", routed)
-        self.assertIn("backend", routed)
-        self.assertIn("egypt", routed)
-
-    def test_source_matching_is_case_and_whitespace_insensitive(self):
-        job = Job(
-            title="Unclassified Fresh Role",
-            company="Acme",
-            location="Remote",
-            url="https://www.linkedin.com/jobs/view/1234567890",
-            source="  LinkedIn  ",
-            tags=[],
-            is_remote=True,
-        )
-        self.assertIn("linkedin_all", route_job(job))
+        message = format_job_message(job)
+        self.assertEqual(route_job(job), ["backend"])
+        self.assertIn("#SaudiArabia", message)
+        self.assertNotIn("#Egypt", message)
 
     def test_send_job_records_false_for_unconfigured_topic(self):
         import telegram_sender

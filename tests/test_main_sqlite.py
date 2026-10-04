@@ -160,6 +160,58 @@ class MainSqliteFlowTests(unittest.TestCase):
             with connect(db_path) as conn:
                 self.assertEqual(get_jobs_for_sending(conn), [])
 
+    def test_legacy_multi_topic_success_suppresses_new_primary_topic_duplicate(self):
+        job = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://wuzzuf.net/jobs/p/routing-migration",
+            source="wuzzuf",
+            tags=["Python"],
+        )
+        calls = []
+
+        def old_router(job_obj):
+            return ["general", "backend"]
+
+        def first_sender(job_obj, topics):
+            topic = topics[0]
+            calls.append(topic)
+            return {topic: topic == "general"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
+            first = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [job])],
+                sender=first_sender,
+                router=old_router,
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(first.topic_send_successes, 1)
+            self.assertEqual(first.topic_send_failures, 1)
+            self.assertEqual(calls, ["general", "backend"])
+
+            second_calls = []
+            second = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [job])],
+                sender=lambda job_obj, topics: second_calls.append(topics[0]) or {topics[0]: True},
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now + timedelta(minutes=15),
+            )
+            self.assertEqual(second.topic_send_successes, 0)
+            self.assertEqual(second_calls, [])
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status FROM jobs WHERE url = ?", (job.url,)
+                ).fetchone()
+                self.assertEqual(row["send_status"], "sent")
+
     def test_seed_mode_stores_jobs_without_sending(self):
         job = Job(
             title="Data Analyst",
@@ -178,7 +230,7 @@ class MainSqliteFlowTests(unittest.TestCase):
                 db_path=db_path,
                 fetchers=[("LinkedIn", lambda: [job])],
                 sender=lambda job_obj, topics: sent.append(topics) or {topic: True for topic in topics},
-                router=lambda job_obj: ["linkedin_all"],
+                router=lambda job_obj: ["general"],
                 cleanup_func=lambda: None,
                 seed_mode=True,
                 reference_time=self.now,
@@ -323,7 +375,7 @@ class MainSqliteFlowTests(unittest.TestCase):
             with connect(db_path) as conn:
                 self.assertEqual(get_jobs_for_sending(conn), [])
 
-    def test_unclassified_linkedin_job_is_kept_for_linkedin_all_topic(self):
+    def test_unclassified_linkedin_job_is_stored_then_skipped_by_primary_router(self):
         job = Job(
             title="People Operations Coordinator",
             company="Acme",
@@ -342,7 +394,6 @@ class MainSqliteFlowTests(unittest.TestCase):
                 db_path=db_path,
                 fetchers=[("LinkedIn", lambda: [job])],
                 sender=lambda job_obj, topics: sent.append((job_obj.title, list(topics))) or {topic: True for topic in topics},
-                router=lambda job_obj: ["linkedin_all"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
                 reference_time=self.now,
@@ -350,8 +401,14 @@ class MainSqliteFlowTests(unittest.TestCase):
             self.assertEqual(summary.filtered_jobs, 1)
             self.assertEqual(summary.inserted_jobs, 1)
             self.assertEqual(summary.fresh_new_jobs, 1)
-            self.assertEqual(summary.topic_send_successes, 1)
-            self.assertEqual(sent, [("People Operations Coordinator", ["linkedin_all"])])
+            self.assertEqual(summary.topic_send_successes, 0)
+            self.assertEqual(summary.skipped_jobs, 1)
+            self.assertEqual(sent, [])
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status FROM jobs WHERE url = ?", (job.url,)
+                ).fetchone()
+                self.assertEqual(row["send_status"], "skipped")
 
     def test_old_linkedin_job_is_stored_but_never_sent(self):
         evidence = parse_relative_publication("2 hours ago", fetched_at=self.now)
@@ -377,7 +434,7 @@ class MainSqliteFlowTests(unittest.TestCase):
                 db_path=db_path,
                 fetchers=[("LinkedIn", lambda: [job])],
                 sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
-                router=lambda job_obj: ["linkedin_all"],
+                router=lambda job_obj: ["backend"],
                 cleanup_func=lambda: None,
                 seed_mode=False,
                 reference_time=self.now,

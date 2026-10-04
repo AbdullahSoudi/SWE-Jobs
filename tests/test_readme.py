@@ -17,10 +17,12 @@ class ReadmeDocumentationTests(unittest.TestCase):
         self.assertIn("jobs.db", self.text)
         self.assertIn("SQLite", self.text)
 
-    def test_readme_documents_linkedin_all_topic(self):
-        self.assertIn("TOPIC_LINKEDIN_ALL", self.text)
-        self.assertIn("LinkedIn Fresh Jobs", self.text)
-        self.assertIn("Receives every fresh LinkedIn job", self.text)
+    def test_readme_documents_single_primary_topic_design(self):
+        self.assertIn("one primary topic", self.text.lower())
+        self.assertIn("TOPIC_BACKEND", self.text)
+        self.assertIn("TOPIC_AI_ML", self.text)
+        self.assertIn("no longer read by the workflow", self.text)
+        self.assertIn("one primary topic per job", self.text.lower())
 
     def test_readme_documents_seed_mode_and_workflow(self):
         self.assertIn("seed_mode", self.text)

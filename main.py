@@ -374,6 +374,27 @@ def send_pending_jobs(
             log.info("Skipped job with no matching topics: %s", job.title)
             continue
 
+        # Transition guard for Update 5: older versions could fan one job out
+        # to several topics.  If any legacy delivery already succeeded, the
+        # user has already seen this job; do not create a new primary-topic
+        # copy during the routing migration.
+        existing_states = get_topic_delivery_states(conn, stored.id)
+        legacy_sent_topics = {
+            topic
+            for topic, state in existing_states.items()
+            if topic not in target_topics and str(state.get("status") or "") == "sent"
+        }
+        if legacy_sent_topics:
+            set_job_send_status(conn, stored.id, "sent")
+            conn.commit()
+            processed += 1
+            log.info(
+                "%s: already delivered by retired routing topics %s; suppressing duplicate",
+                job.title,
+                sorted(legacy_sent_topics),
+            )
+            continue
+
         deadline_at = _delivery_deadline(stored.first_seen_at)
         ensure_topic_deliveries(conn, stored.id, target_topics, deadline_at)
         conn.commit()  # durable outbox before any network call

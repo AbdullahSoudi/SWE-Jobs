@@ -16,9 +16,10 @@ from typing import Callable
 
 import requests
 
-from models import Job
+from models import Job, is_programming_job
 from config import (
     CHANNELS,
+    PRIMARY_TOPIC_ORDER,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_GROUP_ID,
     TELEGRAM_MAX_INLINE_RETRIES,
@@ -107,32 +108,44 @@ def _is_saudi_job(job: Job) -> bool:
 
 
 def route_job(job: Job) -> list[str]:
-    """Determine which configured topics currently match a job."""
-    channels = []
+    """Return exactly one primary Telegram topic for a relevant job.
+
+    Category priority is configured in ``PRIMARY_TOPIC_ORDER``.  Country and
+    source are intentionally not routing dimensions anymore: duplicating one
+    job into role + country + source topics created unnecessary Telegram load
+    and a noisy user experience.
+    """
     tags_str = " ".join(str(t) for t in (job.tags or []))
     searchable = f"{job.title} {job.company} {tags_str}".lower()
 
-    for key, ch in CHANNELS.items():
-        match_type = ch.get("match", "")
+    for key in PRIMARY_TOPIC_ORDER:
+        ch = CHANNELS[key]
+        if _match_keywords(searchable, ch.get("keywords", [])):
+            return [key]
 
-        if match_type == "ALL":
-            channels.append(key)
-        elif match_type == "GEO_EGYPT":
-            if _is_egypt_job(job):
-                channels.append(key)
-        elif match_type == "GEO_SAUDI":
-            if _is_saudi_job(job):
-                channels.append(key)
-        elif match_type == "SOURCE_LINKEDIN":
-            if (job.source or "").strip().lower() == "linkedin":
-                channels.append(key)
-        elif "keywords" in ch and _match_keywords(searchable, ch["keywords"]):
-            channels.append(key)
+    # Keep a useful catch-all for generic technical titles such as
+    # "Software Engineer" while dropping unrelated LinkedIn jobs that were
+    # previously kept only because they came from LinkedIn.
+    if is_programming_job(job):
+        return ["general"]
 
-    return channels
+    return []
 
 
 # ─── Message Formatting ──────────────────────────────────────
+
+def _market_hashtags(job: Job) -> list[str]:
+    tags: list[str] = []
+    if _is_saudi_job(job):
+        tags.append("#SaudiArabia")
+    elif _is_egypt_job(job):
+        tags.append("#Egypt")
+
+    location = (job.location or "").lower()
+    if job.is_remote or "remote" in location or "عن بعد" in location:
+        tags.append("#Remote")
+    return tags
+
 
 def format_job_message(job: Job) -> str:
     emoji = job.emoji
@@ -157,6 +170,10 @@ def format_job_message(job: Job) -> str:
     lines.append("")
     lines.append(f'🔗 <a href="{_escape_html(job.url, quote=True)}">Apply Now</a>')
     lines.append(f"📡 Source: {source}")
+
+    market_tags = _market_hashtags(job)
+    if market_tags:
+        lines.append(" ".join(market_tags))
 
     return "\n".join(lines)
 

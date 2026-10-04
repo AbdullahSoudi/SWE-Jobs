@@ -47,12 +47,11 @@ class WorkflowConfigTests(unittest.TestCase):
         self.assertIn("Store fetched jobs without sending them", self.text)
         self.assertIn("SEED_MODE: ${{ github.event.inputs.seed_mode || 'false' }}", self.text)
 
-    def test_runtime_env_has_current_required_secrets(self):
+    def test_runtime_env_has_only_active_topic_secrets(self):
         required_envs = [
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_GROUP_ID",
             "TOPIC_GENERAL",
-            "TOPIC_LINKEDIN_ALL",
             "TOPIC_BACKEND",
             "TOPIC_FRONTEND",
             "TOPIC_MOBILE",
@@ -60,21 +59,28 @@ class WorkflowConfigTests(unittest.TestCase):
             "TOPIC_QA",
             "TOPIC_AI_ML",
             "TOPIC_CYBERSECURITY",
+            "TOPIC_INTERNSHIPS",
+            "TOPIC_ERP",
+        ]
+        for env_name in required_envs:
+            with self.subTest(env_name=env_name):
+                self.assertIn(env_name + ":", self.text)
+
+        retired_envs = [
+            "TOPIC_LINKEDIN_ALL",
             "TOPIC_GAMEDEV",
             "TOPIC_BLOCKCHAIN",
             "TOPIC_EGYPT",
             "TOPIC_SAUDI",
-            "TOPIC_INTERNSHIPS",
-            "TOPIC_ERP",
             "TOPIC_MARKETING",
             "TOPIC_DATA_ENG",
             "TOPIC_APP_SUPPORT",
             "TOPIC_DESIGN",
             "TOPIC_BUSINESS",
         ]
-        for env_name in required_envs:
-            with self.subTest(env_name=env_name):
-                self.assertIn(env_name + ":", self.text)
+        for env_name in retired_envs:
+            with self.subTest(retired=env_name):
+                self.assertNotIn(env_name + ":", self.text)
 
     def test_disabled_source_api_secrets_are_not_in_workflow(self):
         disabled_envs = [
