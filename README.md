@@ -11,6 +11,8 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Sources:** WUZZUF + LinkedIn public job search cards.
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
+- **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram.
+- **Per-source run history:** fetch counts, freshness outcomes, failures, duration, shadow yield, and coverage gaps are stored for later source scoring.
 - **SQLite state:** jobs, source state, freshness evidence, delivery state, and delivery attempts live in `jobs.db`.
 - **Durable Telegram outbox:** delivery state is written before the network call.
 - **One job = one Telegram post:** each job is assigned one primary role topic only.
@@ -36,6 +38,43 @@ ALL_FETCHERS = [
 | Legacy sources | Disabled | Not registered at runtime |
 
 LinkedIn is intentionally treated as a fragile source. The bot does not log in, access profiles, collect member data, or scrape full descriptions.
+
+
+## Shadow Mode and Source Metrics
+
+New sources are **shadowed by default**. The production allowlist currently contains only:
+
+```python
+PRODUCTION_SOURCE_KEYS = {"linkedin", "wuzzuf"}
+```
+
+A source that is not in this set still runs the complete discovery pipeline:
+
+```text
+fetch
+→ filter
+→ freshness evaluation
+→ SQLite persistence
+→ metrics/history
+→ NO Telegram delivery
+```
+
+Fresh jobs discovered by a shadow source are stored with `send_status = shadow`. When the source is later promoted, historical shadow rows remain suppressed; only jobs discovered **after** promotion can create Telegram deliveries. This prevents a promotion-time backlog flood.
+
+Each source run appends one row to `source_run_history` with fields such as:
+
+```text
+status / error / duration_ms
+raw_count / filtered_count
+inserted_count / refreshed_count
+fresh_count / expired_count / uncertain_count
+baseline_skipped_count / shadow_eligible_count
+coverage_gap / shadow_mode
+```
+
+`source_runs` also keeps the latest health snapshot and consecutive failure/empty-run counters. A warning is logged after repeated successful zero-result fetches.
+
+This is the foundation for evaluating future Saudi sources in shadow mode before enabling them. Cross-source exclusive yield and lead-time scoring will be added after the dedup/cluster layer exists; this update intentionally does not invent those metrics yet.
 
 ## Telegram Topics
 
@@ -194,7 +233,8 @@ Each attempt is recorded in `delivery_attempts` with useful debugging fields suc
 - source job IDs and canonical URLs;
 - freshness evidence and decision reason;
 - first/last seen times;
-- source baseline and health state;
+- source baseline, shadow/production state, and latest health counters;
+- append-only per-source run history and metrics;
 - job send status;
 - durable topic delivery rows;
 - append-only delivery attempt audit rows;
@@ -215,7 +255,8 @@ quality + geography filtering
     ↓
 freshness gate
     ├─ baseline → store, no send
-    ├─ fresh → queue
+    ├─ fresh + production source → queue
+    ├─ fresh + shadow source → store as shadow, no send
     └─ stale/unsafe → expire
     ↓
 SQLite upsert
@@ -253,7 +294,7 @@ Git-backed SQLite is still the current persistence mechanism. The longer-term ar
 
 Manual GitHub runs support `seed_mode=true`.
 
-Seed mode stores/baselines jobs without sending them. This is useful when introducing a new source and prevents a first-run backlog flood.
+Seed mode stores/baselines jobs without sending them. New source integrations should normally remain in shadow mode across multiple runs before promotion; seed mode is still useful for manual one-time baselining.
 
 ## Local Testing
 
@@ -327,3 +368,4 @@ python main.py
 - Old Telegram topics do not need to be deleted immediately; they simply stop receiving new jobs.
 - Do not publish full job descriptions in the group; cards intentionally stay compact.
 - LinkedIn remains a fragile dependency, which is why Saudi source diversification and ATS/company feeds are planned next.
+- New Saudi sources should be added to the fetch registry first, observed in shadow mode, and promoted only after their freshness/relevance/reliability metrics look healthy.

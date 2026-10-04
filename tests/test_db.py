@@ -13,9 +13,11 @@ from db import (
     get_jobs_for_sending,
     get_metadata,
     get_source_last_run,
+    get_recent_source_run_history,
     get_sent_topic_keys,
     job_content_hash,
     normalize_company,
+    record_source_run_history,
     record_topic_send,
     set_job_send_status,
     update_source_run,
@@ -187,6 +189,53 @@ class DbLayerTests(unittest.TestCase):
         tracked = Job("Backend Developer", "Acme LLC", "Cairo", "https://x.test/j/1?utm_campaign=a", "linkedin")
         self.assertEqual(job_content_hash(base), job_content_hash(tracked))
 
+    def test_shadow_is_a_valid_terminal_send_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            with connect(db_path) as conn:
+                job_id, _ = upsert_job(
+                    conn,
+                    Job("Backend Developer", "Acme", "Riyadh", "https://jobs.example.com/shadow", "newboard"),
+                )
+                set_job_send_status(conn, job_id, "shadow")
+                self.assertEqual(get_jobs_for_sending(conn), [])
+
+    def test_source_run_history_is_append_only_and_keeps_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            with connect(db_path) as conn:
+                record_source_run_history(
+                    conn,
+                    "linkedin",
+                    run_at="2026-10-04T15:00:00Z",
+                    status="ok",
+                    duration_ms=321,
+                    raw_count=40,
+                    filtered_count=12,
+                    inserted_count=7,
+                    refreshed_count=5,
+                    fresh_count=6,
+                    shadow_eligible_count=0,
+                    coverage_gap=False,
+                    shadow_mode=False,
+                )
+                record_source_run_history(
+                    conn,
+                    "linkedin",
+                    run_at="2026-10-04T15:15:00Z",
+                    status="failed",
+                    error="timeout",
+                    duration_ms=900,
+                    shadow_mode=False,
+                )
+                rows = get_recent_source_run_history(conn, "linkedin")
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[0]["status"], "failed")
+                self.assertEqual(rows[0]["error"], "timeout")
+                self.assertEqual(rows[1]["raw_count"], 40)
+                self.assertEqual(rows[1]["fresh_count"], 6)
+                self.assertEqual(rows[1]["duration_ms"], 321)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -250,7 +299,7 @@ class FreshnessSchemaV3Tests(unittest.TestCase):
                 row = conn.execute("SELECT * FROM source_runs WHERE source = 'linkedin'").fetchone()
                 self.assertEqual(row["last_success_at"], "2026-10-04T12:00:00Z")
                 self.assertEqual(row["baselined_at"], "2026-10-04T12:00:00Z")
-                self.assertEqual(get_metadata(conn, "schema_version"), "4")
+                self.assertEqual(get_metadata(conn, "schema_version"), "5")
 
     def test_new_source_does_not_auto_baseline_across_reconnects(self):
         from db import is_source_baselined, mark_source_baselined

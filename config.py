@@ -724,3 +724,12 @@ DEFAULT_SOURCE_FRESHNESS_POLICY = {
     "max_age_seconds": 60 * 60,
     "uncertain_fallback": "NONE",
 }
+
+# Sources allowed to create Telegram deliveries. Any source not listed here
+# runs in shadow mode by default: fetch, normalize, persist and measure, but
+# never send. Promotion is therefore an explicit code/config decision.
+PRODUCTION_SOURCE_KEYS = {"linkedin", "wuzzuf"}
+
+# Health signal only; zero-result runs are persisted for later analysis and a
+# warning is emitted after this many consecutive successful empty fetches.
+SOURCE_EMPTY_RUN_WARNING_THRESHOLD = 4

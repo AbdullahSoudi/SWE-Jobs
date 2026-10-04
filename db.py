@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from models import Job
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -212,8 +212,40 @@ def init_db(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'never',
             error TEXT DEFAULT '',
             consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            consecutive_empty_runs INTEGER NOT NULL DEFAULT 0,
+            shadow_mode INTEGER NOT NULL DEFAULT 1,
+            last_raw_count INTEGER NOT NULL DEFAULT 0,
+            last_filtered_count INTEGER NOT NULL DEFAULT 0,
+            last_inserted_count INTEGER NOT NULL DEFAULT 0,
+            last_fresh_count INTEGER NOT NULL DEFAULT 0,
+            last_shadow_eligible_count INTEGER NOT NULL DEFAULT 0,
+            last_duration_ms INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS source_run_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            run_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error TEXT DEFAULT '',
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            raw_count INTEGER NOT NULL DEFAULT 0,
+            filtered_count INTEGER NOT NULL DEFAULT 0,
+            inserted_count INTEGER NOT NULL DEFAULT 0,
+            refreshed_count INTEGER NOT NULL DEFAULT 0,
+            fresh_count INTEGER NOT NULL DEFAULT 0,
+            expired_count INTEGER NOT NULL DEFAULT 0,
+            uncertain_count INTEGER NOT NULL DEFAULT 0,
+            baseline_skipped_count INTEGER NOT NULL DEFAULT 0,
+            shadow_eligible_count INTEGER NOT NULL DEFAULT 0,
+            coverage_gap INTEGER NOT NULL DEFAULT 0,
+            shadow_mode INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_source_run_history_source_time
+            ON source_run_history(source, run_at);
         """
     )
     previous_row = conn.execute(
@@ -291,6 +323,44 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         """
     )
 
+    for definition in (
+        "consecutive_empty_runs INTEGER NOT NULL DEFAULT 0",
+        "shadow_mode INTEGER NOT NULL DEFAULT 1",
+        "last_raw_count INTEGER NOT NULL DEFAULT 0",
+        "last_filtered_count INTEGER NOT NULL DEFAULT 0",
+        "last_inserted_count INTEGER NOT NULL DEFAULT 0",
+        "last_fresh_count INTEGER NOT NULL DEFAULT 0",
+        "last_shadow_eligible_count INTEGER NOT NULL DEFAULT 0",
+        "last_duration_ms INTEGER NOT NULL DEFAULT 0",
+    ):
+        _ensure_column(conn, "source_runs", definition)
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS source_run_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            run_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error TEXT DEFAULT '',
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            raw_count INTEGER NOT NULL DEFAULT 0,
+            filtered_count INTEGER NOT NULL DEFAULT 0,
+            inserted_count INTEGER NOT NULL DEFAULT 0,
+            refreshed_count INTEGER NOT NULL DEFAULT 0,
+            fresh_count INTEGER NOT NULL DEFAULT 0,
+            expired_count INTEGER NOT NULL DEFAULT 0,
+            uncertain_count INTEGER NOT NULL DEFAULT 0,
+            baseline_skipped_count INTEGER NOT NULL DEFAULT 0,
+            shadow_eligible_count INTEGER NOT NULL DEFAULT 0,
+            coverage_gap INTEGER NOT NULL DEFAULT 0,
+            shadow_mode INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_run_history_source_time
+            ON source_run_history(source, run_at);
+        """
+    )
 
     # Only schema-v1 databases have legacy successful sources that predate
     # explicit baselining. Do not auto-baseline sources created after v2.
@@ -333,6 +403,12 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
             WHERE status = 'failed'
             """
         )
+
+    if previous_version < 5:
+        # Every source that existed before shadow-mode support was already a
+        # production source. Preserve that behavior during migration. New
+        # source rows default to shadow_mode=1.
+        conn.execute("UPDATE source_runs SET shadow_mode = 0")
 
 
 def now_utc() -> str:
@@ -815,7 +891,7 @@ def get_sent_topic_keys(conn: sqlite3.Connection, job_id: int) -> set[str]:
 
 def set_job_send_status(conn: sqlite3.Connection, job_id: int, status: str) -> None:
     """Set the aggregate send status for a job."""
-    allowed = {"pending", "sent", "retry", "partial", "skipped", "expired", "failed", "unknown", "partial_failed"}
+    allowed = {"pending", "sent", "retry", "partial", "skipped", "shadow", "expired", "failed", "unknown", "partial_failed"}
     if status not in allowed:
         raise ValueError(f"Invalid send status: {status}")
     conn.execute("UPDATE jobs SET send_status = ? WHERE id = ?", (status, job_id))
@@ -890,18 +966,34 @@ def update_source_run(
     status: str,
     error: str = "",
     last_run_at: Optional[str] = None,
+    *,
+    shadow_mode: bool | None = None,
+    raw_count: int = 0,
+    filtered_count: int = 0,
+    inserted_count: int = 0,
+    fresh_count: int = 0,
+    shadow_eligible_count: int = 0,
+    duration_ms: int = 0,
 ) -> None:
-    """Record source run health/timing without implicitly baselining new sources."""
+    """Record current source health without implicitly baselining new sources."""
     ts = now_utc()
     run_at = last_run_at or ts
     is_ok = status == "ok"
+    existing = get_source_state(conn, source)
+    if shadow_mode is None:
+        shadow_value = int(existing["shadow_mode"]) if existing and "shadow_mode" in existing.keys() else 0
+    else:
+        shadow_value = 1 if shadow_mode else 0
+
     conn.execute(
         """
         INSERT INTO source_runs(
             source, last_run_at, last_success_at, baselined_at, status, error,
-            consecutive_failures, updated_at
+            consecutive_failures, consecutive_empty_runs, shadow_mode,
+            last_raw_count, last_filtered_count, last_inserted_count,
+            last_fresh_count, last_shadow_eligible_count, last_duration_ms, updated_at
         )
-        VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+        VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source) DO UPDATE SET
             last_run_at = excluded.last_run_at,
             last_success_at = CASE
@@ -914,10 +1006,81 @@ def update_source_run(
                 WHEN excluded.status = 'ok' THEN 0
                 ELSE source_runs.consecutive_failures + 1
             END,
+            consecutive_empty_runs = CASE
+                WHEN excluded.status != 'ok' THEN source_runs.consecutive_empty_runs
+                WHEN excluded.last_raw_count = 0 THEN source_runs.consecutive_empty_runs + 1
+                ELSE 0
+            END,
+            shadow_mode = excluded.shadow_mode,
+            last_raw_count = excluded.last_raw_count,
+            last_filtered_count = excluded.last_filtered_count,
+            last_inserted_count = excluded.last_inserted_count,
+            last_fresh_count = excluded.last_fresh_count,
+            last_shadow_eligible_count = excluded.last_shadow_eligible_count,
+            last_duration_ms = excluded.last_duration_ms,
             updated_at = excluded.updated_at
         """,
-        (source, run_at, run_at if is_ok else None, status, error or "", 0 if is_ok else 1, ts),
+        (
+            source, run_at, run_at if is_ok else None, status, error or "",
+            0 if is_ok else 1, 1 if is_ok and raw_count == 0 else 0, shadow_value,
+            max(0, int(raw_count)), max(0, int(filtered_count)),
+            max(0, int(inserted_count)), max(0, int(fresh_count)),
+            max(0, int(shadow_eligible_count)), max(0, int(duration_ms)), ts,
+        ),
     )
+
+
+def record_source_run_history(
+    conn: sqlite3.Connection,
+    source: str,
+    *,
+    run_at: str,
+    status: str,
+    error: str = "",
+    duration_ms: int = 0,
+    raw_count: int = 0,
+    filtered_count: int = 0,
+    inserted_count: int = 0,
+    refreshed_count: int = 0,
+    fresh_count: int = 0,
+    expired_count: int = 0,
+    uncertain_count: int = 0,
+    baseline_skipped_count: int = 0,
+    shadow_eligible_count: int = 0,
+    coverage_gap: bool = False,
+    shadow_mode: bool = True,
+) -> int:
+    """Append immutable per-run source metrics for trend/health analysis."""
+    cur = conn.execute(
+        """
+        INSERT INTO source_run_history(
+            source, run_at, status, error, duration_ms, raw_count,
+            filtered_count, inserted_count, refreshed_count, fresh_count,
+            expired_count, uncertain_count, baseline_skipped_count,
+            shadow_eligible_count, coverage_gap, shadow_mode, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            source, run_at, status, error or "", max(0, int(duration_ms)),
+            max(0, int(raw_count)), max(0, int(filtered_count)),
+            max(0, int(inserted_count)), max(0, int(refreshed_count)),
+            max(0, int(fresh_count)), max(0, int(expired_count)),
+            max(0, int(uncertain_count)), max(0, int(baseline_skipped_count)),
+            max(0, int(shadow_eligible_count)), 1 if coverage_gap else 0,
+            1 if shadow_mode else 0, now_utc(),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def get_recent_source_run_history(
+    conn: sqlite3.Connection, source: str, limit: int = 20
+) -> list[sqlite3.Row]:
+    """Return newest immutable run records for one source."""
+    return conn.execute(
+        "SELECT * FROM source_run_history WHERE source = ? ORDER BY id DESC LIMIT ?",
+        (source, max(1, int(limit))),
+    ).fetchall()
 
 
 def get_source_state(conn: sqlite3.Connection, source: str) -> Optional[sqlite3.Row]:

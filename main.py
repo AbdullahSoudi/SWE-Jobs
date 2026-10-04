@@ -24,7 +24,9 @@ from config import (
     LEGACY_BACKLOG_MAX_AGE_MINUTES,
     MAX_JOBS_PER_RUN,
     PENDING_SEND_MAX_AGE_MINUTES,
+    PRODUCTION_SOURCE_KEYS,
     SEED_MODE_ENV,
+    SOURCE_EMPTY_RUN_WARNING_THRESHOLD,
     SOURCE_FRESHNESS_POLICIES,
 )
 try:
@@ -61,11 +63,13 @@ from db import (
     get_metadata,
     ensure_topic_deliveries,
     get_source_last_success,
+    get_source_state,
     get_topic_delivery_states,
     is_source_baselined,
     mark_source_baselined,
     mark_topic_sending,
     record_delivery_result,
+    record_source_run_history,
     recover_stale_sending_deliveries,
     set_job_freshness_state,
     set_job_send_status,
@@ -96,6 +100,24 @@ class SourceContext:
 
 
 @dataclass
+class SourceCycleMetrics:
+    status: str = "never"
+    error: str = ""
+    duration_ms: int = 0
+    raw_jobs: int = 0
+    filtered_jobs: int = 0
+    inserted_jobs: int = 0
+    refreshed_jobs: int = 0
+    fresh_new_jobs: int = 0
+    expired_new_jobs: int = 0
+    uncertain_new_jobs: int = 0
+    baseline_skipped_jobs: int = 0
+    shadow_eligible_jobs: int = 0
+    coverage_gap: bool = False
+    shadow_mode: bool = True
+
+
+@dataclass
 class RunSummary:
     raw_jobs: int = 0
     filtered_jobs: int = 0
@@ -105,7 +127,10 @@ class RunSummary:
     expired_new_jobs: int = 0
     uncertain_new_jobs: int = 0
     baseline_skipped_jobs: int = 0
+    shadow_eligible_jobs: int = 0
     sources_baselined: int = 0
+    source_failures: int = 0
+    source_runs_recorded: int = 0
     pending_processed: int = 0
     topic_send_successes: int = 0
     topic_send_failures: int = 0
@@ -145,17 +170,15 @@ def fetch_all_jobs(
     fetchers: Iterable[Fetcher],
     *,
     run_at: str | None = None,
-) -> tuple[list[Job], set[str]]:
-    """Fetch jobs and return both rows and successfully fetched source keys.
-
-    Successful source state is committed only after fetched jobs are persisted.
-    Failed source state is recorded immediately so failures survive the run.
-    """
+) -> tuple[list[Job], dict[str, SourceCycleMetrics]]:
+    """Fetch jobs and capture per-source timing/status metrics."""
     all_jobs: list[Job] = []
-    successful_sources: set[str] = set()
+    source_metrics: dict[str, SourceCycleMetrics] = {}
 
     for display_name, fetcher in fetchers:
         source_key = _source_key(display_name)
+        metrics = SourceCycleMetrics()
+        started = time.perf_counter()
         try:
             log.info("Fetching from %s...", display_name)
             jobs = fetcher() or []
@@ -169,13 +192,18 @@ def fetch_all_jobs(
                         job.source,
                     )
             all_jobs.extend(jobs)
-            successful_sources.add(source_key)
+            metrics.status = "ok"
+            metrics.raw_jobs = len(jobs)
             log.info("  %s: %s raw jobs", display_name, len(jobs))
         except Exception as exc:  # keep one failed source from killing the run
-            update_source_run(conn, source_key, "failed", str(exc), last_run_at=run_at)
+            metrics.status = "failed"
+            metrics.error = str(exc)
             log.error("  %s failed: %s", display_name, exc)
+        finally:
+            metrics.duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+            source_metrics[source_key] = metrics
 
-    return all_jobs, successful_sources
+    return all_jobs, source_metrics
 
 
 def should_keep_job(job: Job) -> bool:
@@ -211,36 +239,65 @@ def _policy_for_source(source_key: str) -> dict[str, object]:
     return dict(policy)
 
 
+def _is_shadow_source(source_key: str, production_source_keys: set[str]) -> bool:
+    return _source_key(source_key) not in {_source_key(value) for value in production_source_keys}
+
+
+def _has_coverage_gap(
+    previous_success_at: str | None,
+    source_key: str,
+    reference_time: datetime,
+) -> bool:
+    if not previous_success_at:
+        return False
+    try:
+        previous = _parse_iso(previous_success_at)
+    except (TypeError, ValueError):
+        return True
+    policy = _policy_for_source(source_key)
+    max_age_seconds = max(1, int(policy.get("max_age_seconds", 3600)))
+    return (reference_time - previous).total_seconds() > max_age_seconds
+
+
 def persist_filtered_jobs(
     conn,
     jobs: list[Job],
     source_context: dict[str, SourceContext],
+    source_metrics: dict[str, SourceCycleMetrics],
+    production_source_keys: set[str],
     *,
     reference_time: datetime | None = None,
-) -> tuple[int, int, list[Job], int, int, int, int]:
+) -> tuple[int, int, list[Job], int, int, int, int, int]:
     """Filter, persist, and freshness-gate newly discovered jobs.
 
     Returns:
         inserted, refreshed, filtered, fresh_new, expired_new,
-        uncertain_new, baseline_skipped
+        uncertain_new, baseline_skipped, shadow_eligible
     """
     filtered = filter_jobs_for_runtime(jobs)
+    for job in filtered:
+        source_key = _source_key(job.source)
+        source_metrics.setdefault(source_key, SourceCycleMetrics(status="ok")).filtered_jobs += 1
     inserted = 0
     refreshed = 0
     fresh_new = 0
     expired_new = 0
     uncertain_new = 0
     baseline_skipped = 0
+    shadow_eligible = 0
     now = ensure_utc(reference_time or utc_now())
 
     for job in filtered:
+        source_key = _source_key(job.source)
+        metrics = source_metrics.setdefault(source_key, SourceCycleMetrics(status="ok"))
         job_id, is_new = upsert_job(conn, job)
         if not is_new:
             refreshed += 1
+            metrics.refreshed_jobs += 1
             continue
 
         inserted += 1
-        source_key = _source_key(job.source)
+        metrics.inserted_jobs += 1
         context = source_context.get(source_key, SourceContext(False, None))
         policy = _policy_for_source(source_key)
         decision = evaluate_new_posting(
@@ -255,16 +312,24 @@ def persist_filtered_jobs(
 
         if decision.send_eligible:
             fresh_new += 1
+            metrics.fresh_new_jobs += 1
+            if _is_shadow_source(source_key, production_source_keys):
+                set_job_send_status(conn, job_id, "shadow")
+                shadow_eligible += 1
+                metrics.shadow_eligible_jobs += 1
             continue
 
         if decision.status == BASELINE:
             set_job_send_status(conn, job_id, "skipped")
             baseline_skipped += 1
+            metrics.baseline_skipped_jobs += 1
         else:
             set_job_send_status(conn, job_id, "expired")
             expired_new += 1
+            metrics.expired_new_jobs += 1
             if decision.status == UNCERTAIN:
                 uncertain_new += 1
+                metrics.uncertain_new_jobs += 1
 
     conn.commit()
     return (
@@ -275,6 +340,7 @@ def persist_filtered_jobs(
         expired_new,
         uncertain_new,
         baseline_skipped,
+        shadow_eligible,
     )
 
 
@@ -491,6 +557,7 @@ def run_bot(
     max_jobs_per_run: int = MAX_JOBS_PER_RUN,
     seed_mode: bool | None = None,
     reference_time: datetime | None = None,
+    production_source_keys: set[str] | None = None,
 ) -> RunSummary:
     """Run one bot cycle. Parameters are injectable for tests."""
     start = time.time()
@@ -498,6 +565,7 @@ def run_bot(
     run_at = iso_utc(run_reference)
     summary = RunSummary(seed_mode=_is_seed_mode(seed_mode))
     fetcher_list = list(fetchers)
+    production_keys = set(PRODUCTION_SOURCE_KEYS if production_source_keys is None else production_source_keys)
 
     log.info("=" * 60)
     log.info("Programming Jobs Bot - Starting run")
@@ -532,7 +600,7 @@ def run_bot(
             )
 
         source_context = _capture_source_context(conn, fetcher_list)
-        all_jobs, successful_sources = fetch_all_jobs(
+        all_jobs, source_metrics = fetch_all_jobs(
             conn,
             fetcher_list,
             run_at=run_at,
@@ -548,10 +616,13 @@ def run_bot(
             expired_new,
             uncertain_new,
             baseline_skipped,
+            shadow_eligible,
         ) = persist_filtered_jobs(
             conn,
             all_jobs,
             source_context,
+            source_metrics,
+            production_keys,
             reference_time=run_reference,
         )
         summary.filtered_jobs = len(filtered)
@@ -561,19 +632,77 @@ def run_bot(
         summary.expired_new_jobs = expired_new
         summary.uncertain_new_jobs = uncertain_new
         summary.baseline_skipped_jobs = baseline_skipped
+        summary.shadow_eligible_jobs = shadow_eligible
 
-        # Advance successful source state only after fetched rows are persisted.
-        for source_key in sorted(successful_sources):
-            update_source_run(conn, source_key, "ok", last_run_at=run_at)
+        # Persist immutable source metrics only after fetched rows are safely stored.
+        for source_key, metrics in sorted(source_metrics.items()):
             context = source_context.get(source_key, SourceContext(False, None))
-            if not context.was_baselined:
-                mark_source_baselined(conn, source_key, baselined_at=run_at)
-                summary.sources_baselined += 1
+            metrics.shadow_mode = _is_shadow_source(source_key, production_keys)
+            metrics.coverage_gap = _has_coverage_gap(
+                context.previous_success_at, source_key, run_reference
+            )
+
+            update_source_run(
+                conn,
+                source_key,
+                metrics.status,
+                metrics.error,
+                last_run_at=run_at,
+                shadow_mode=metrics.shadow_mode,
+                raw_count=metrics.raw_jobs,
+                filtered_count=metrics.filtered_jobs,
+                inserted_count=metrics.inserted_jobs,
+                fresh_count=metrics.fresh_new_jobs,
+                shadow_eligible_count=metrics.shadow_eligible_jobs,
+                duration_ms=metrics.duration_ms,
+            )
+            record_source_run_history(
+                conn,
+                source_key,
+                run_at=run_at,
+                status=metrics.status,
+                error=metrics.error,
+                duration_ms=metrics.duration_ms,
+                raw_count=metrics.raw_jobs,
+                filtered_count=metrics.filtered_jobs,
+                inserted_count=metrics.inserted_jobs,
+                refreshed_count=metrics.refreshed_jobs,
+                fresh_count=metrics.fresh_new_jobs,
+                expired_count=metrics.expired_new_jobs,
+                uncertain_count=metrics.uncertain_new_jobs,
+                baseline_skipped_count=metrics.baseline_skipped_jobs,
+                shadow_eligible_count=metrics.shadow_eligible_jobs,
+                coverage_gap=metrics.coverage_gap,
+                shadow_mode=metrics.shadow_mode,
+            )
+            summary.source_runs_recorded += 1
+
+            if metrics.status == "ok":
+                if not context.was_baselined:
+                    mark_source_baselined(conn, source_key, baselined_at=run_at)
+                    summary.sources_baselined += 1
+            else:
+                summary.source_failures += 1
+
+            state = get_source_state(conn, source_key)
+            if (
+                state
+                and metrics.status == "ok"
+                and int(state["consecutive_empty_runs"] or 0) >= SOURCE_EMPTY_RUN_WARNING_THRESHOLD
+            ):
+                log.warning(
+                    "Source %s has returned zero jobs for %s consecutive successful runs.",
+                    source_key,
+                    state["consecutive_empty_runs"],
+                )
+            if metrics.coverage_gap:
+                log.warning("Source %s has a freshness coverage gap.", source_key)
+
         conn.commit()
 
         log.info(
             "After filtering: %s jobs | inserted=%s, refreshed=%s, fresh=%s, "
-            "expired=%s, uncertain=%s, baseline_skipped=%s",
+            "expired=%s, uncertain=%s, baseline_skipped=%s, shadow_eligible=%s",
             summary.filtered_jobs,
             inserted,
             refreshed,
@@ -581,6 +710,7 @@ def run_bot(
             expired_new,
             uncertain_new,
             baseline_skipped,
+            shadow_eligible,
         )
 
         if summary.seed_mode:
@@ -610,7 +740,14 @@ def run_bot(
         summary.total_jobs_in_db = count_jobs(conn)
 
     elapsed = time.time() - start
-    log.info("Run complete in %.1fs. Total DB jobs: %s", elapsed, summary.total_jobs_in_db)
+    log.info(
+        "Run complete in %.1fs. Total DB jobs: %s | source_runs=%s, source_failures=%s, shadow_eligible=%s",
+        elapsed,
+        summary.total_jobs_in_db,
+        summary.source_runs_recorded,
+        summary.source_failures,
+        summary.shadow_eligible_jobs,
+    )
     log.info("=" * 60)
     return summary
 

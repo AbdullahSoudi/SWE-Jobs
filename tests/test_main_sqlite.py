@@ -36,6 +36,23 @@ class MainSqliteFlowTests(unittest.TestCase):
             update_source_run(conn, source, "ok", last_run_at=stamp)
             mark_source_baselined(conn, source, baselined_at=stamp)
 
+    def fresh_job(self, *, title, url, source, at):
+        evidence = parse_relative_publication("5 minutes ago", fetched_at=at)
+        return Job(
+            title=title,
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url=url,
+            source=source,
+            tags=["Python"],
+            published_at_raw=evidence.raw,
+            published_at_earliest=evidence.earliest,
+            published_at_latest=evidence.latest,
+            published_at_est=evidence.estimate,
+            published_precision=evidence.precision,
+            time_semantics=evidence.semantics,
+        )
+
     def test_new_source_first_fetch_is_baseline_then_next_new_job_sends(self):
         first_job = Job(
             title="Backend Developer",
@@ -211,6 +228,135 @@ class MainSqliteFlowTests(unittest.TestCase):
                     "SELECT send_status FROM jobs WHERE url = ?", (job.url,)
                 ).fetchone()
                 self.assertEqual(row["send_status"], "sent")
+
+    def test_unknown_source_stays_shadow_after_baseline_until_explicitly_promoted(self):
+        source = "saudiboard"
+        first_time = self.now
+        second_time = self.now + timedelta(minutes=15)
+        third_time = self.now + timedelta(minutes=30)
+        job1 = self.fresh_job(
+            title="Backend Developer I",
+            url="https://jobs.example.com/saudi-1",
+            source=source,
+            at=first_time,
+        )
+        job2 = self.fresh_job(
+            title="Backend Developer II",
+            url="https://jobs.example.com/saudi-2",
+            source=source,
+            at=second_time,
+        )
+        job3 = self.fresh_job(
+            title="Backend Developer III",
+            url="https://jobs.example.com/saudi-3",
+            source=source,
+            at=third_time,
+        )
+        sent = []
+
+        def fake_sender(job_obj, topics):
+            sent.append(job_obj.title)
+            return {topic: True for topic in topics}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+
+            first = main.run_bot(
+                db_path=db_path,
+                fetchers=[("SaudiBoard", lambda: [job1])],
+                sender=fake_sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                reference_time=first_time,
+            )
+            self.assertEqual(first.baseline_skipped_jobs, 1)
+            self.assertEqual(sent, [])
+
+            second = main.run_bot(
+                db_path=db_path,
+                fetchers=[("SaudiBoard", lambda: [job1, job2])],
+                sender=fake_sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                reference_time=second_time,
+            )
+            self.assertEqual(second.fresh_new_jobs, 1)
+            self.assertEqual(second.shadow_eligible_jobs, 1)
+            self.assertEqual(second.topic_send_successes, 0)
+            self.assertEqual(sent, [])
+
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status FROM jobs WHERE url = ?", (job2.url,)
+                ).fetchone()
+                self.assertEqual(row["send_status"], "shadow")
+                state = get_source_state(conn, source)
+                self.assertEqual(state["shadow_mode"], 1)
+                history = conn.execute(
+                    "SELECT * FROM source_run_history WHERE source = ? ORDER BY id",
+                    (source,),
+                ).fetchall()
+                self.assertEqual(len(history), 2)
+                self.assertEqual(history[-1]["shadow_eligible_count"], 1)
+
+            third = main.run_bot(
+                db_path=db_path,
+                fetchers=[("SaudiBoard", lambda: [job1, job2, job3])],
+                sender=fake_sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                reference_time=third_time,
+                production_source_keys={source},
+            )
+            self.assertEqual(third.fresh_new_jobs, 1)
+            self.assertEqual(third.shadow_eligible_jobs, 0)
+            self.assertEqual(third.topic_send_successes, 1)
+            self.assertEqual(sent, ["Backend Developer III"])
+            with connect(db_path) as conn:
+                state = get_source_state(conn, source)
+                self.assertEqual(state["shadow_mode"], 0)
+                old_shadow = conn.execute(
+                    "SELECT send_status FROM jobs WHERE url = ?", (job2.url,)
+                ).fetchone()["send_status"]
+                self.assertEqual(old_shadow, "shadow")
+
+    def test_source_run_metrics_capture_failure_and_success(self):
+        job = self.fresh_job(
+            title="Backend Developer",
+            url="https://jobs.example.com/metrics",
+            source="wuzzuf",
+            at=self.now,
+        )
+
+        def broken():
+            raise RuntimeError("source down")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
+            summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("Broken", broken), ("WUZZUF", lambda: [job])],
+                sender=lambda job_obj, topics: {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                reference_time=self.now,
+            )
+            self.assertEqual(summary.source_runs_recorded, 2)
+            self.assertEqual(summary.source_failures, 1)
+            with connect(db_path) as conn:
+                success = conn.execute(
+                    "SELECT * FROM source_run_history WHERE source = 'wuzzuf' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                failed = conn.execute(
+                    "SELECT * FROM source_run_history WHERE source = 'broken' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                self.assertEqual(success["status"], "ok")
+                self.assertEqual(success["raw_count"], 1)
+                self.assertEqual(success["filtered_count"], 1)
+                self.assertEqual(success["inserted_count"], 1)
+                self.assertEqual(failed["status"], "failed")
+                self.assertIn("source down", failed["error"])
 
     def test_seed_mode_stores_jobs_without_sending(self):
         job = Job(
