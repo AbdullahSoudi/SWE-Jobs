@@ -42,6 +42,7 @@ class ReadmeDocumentationTests(unittest.TestCase):
     def test_readme_lists_current_tests(self):
         for test_file in [
             "test_db.py",
+            "test_freshness.py",
             "test_linkedin.py",
             "test_main_sqlite.py",
             "test_routing.py",

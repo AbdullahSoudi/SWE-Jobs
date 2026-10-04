@@ -13,9 +13,11 @@ import logging
 import os
 import re
 import time
+from datetime import UTC, datetime
 from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+from freshness import PublicationEvidence, TOO_OLD, freshness_decision, parse_iso_publication, parse_relative_publication
 from models import Job
 
 try:  # final project layout
@@ -118,6 +120,8 @@ CLOSED_JOB_MARKERS = (
     "expired",
     "closed",
 )
+TIME_TAG_RE = re.compile(r"<time\b(?P<attrs>[^>]*)>(?P<text>.*?)</time>", re.IGNORECASE | re.DOTALL)
+DATETIME_ATTR_RE = re.compile(r"\bdatetime=[\"'](?P<value>[^\"']+)[\"']", re.IGNORECASE)
 
 
 def fetch_linkedin(
@@ -177,6 +181,7 @@ def parse_linkedin_html(
     page_html: str,
     search_params: dict[str, str] | None = None,
     max_age_seconds: int | None = None,
+    fetched_at: datetime | None = None,
 ) -> list[Job]:
     """Parse visible LinkedIn guest search cards into Job objects.
 
@@ -189,6 +194,7 @@ def parse_linkedin_html(
         return []
 
     params = search_params or {}
+    fetched = fetched_at or datetime.now(UTC)
     cards = _extract_cards(page_html)
     jobs: list[Job] = []
     seen_urls: set[str] = set()
@@ -196,7 +202,11 @@ def parse_linkedin_html(
     for card in cards:
         if _is_closed_or_inactive_card(card):
             continue
-        if max_age_seconds is not None and _card_is_older_than(card, max_age_seconds):
+
+        publication = _extract_publication_evidence(card, fetched)
+        if max_age_seconds is not None and freshness_decision(
+            publication, max_age_seconds, reference_time=fetched
+        ) == TOO_OLD:
             continue
 
         title = _clean(_match_group(TITLE_RE, card, "title"))
@@ -225,8 +235,14 @@ def parse_linkedin_html(
             job_type=job_type,
             tags=tags,
             is_remote=is_remote,
+            source_job_id=extract_linkedin_job_id(url),
+            published_at_raw=publication.raw,
+            published_at_earliest=publication.earliest,
+            published_at_latest=publication.latest,
+            published_at_est=publication.estimate,
+            published_precision=publication.precision,
+            time_semantics=publication.semantics,
         )
-        setattr(job, "source_job_id", extract_linkedin_job_id(url))
         jobs.append(job)
 
     return jobs
@@ -278,9 +294,33 @@ def _is_closed_or_inactive_card(card_html: str) -> bool:
     return any(marker in text for marker in CLOSED_JOB_MARKERS)
 
 
-def _card_is_older_than(card_html: str, max_age_seconds: int) -> bool:
-    age_seconds = _extract_relative_age_seconds(card_html)
-    return age_seconds is not None and age_seconds > max_age_seconds
+def _extract_publication_evidence(
+    card_html: str,
+    fetched_at: datetime | None = None,
+) -> PublicationEvidence:
+    """Extract the visible posting-time evidence from one LinkedIn card."""
+    time_match = TIME_TAG_RE.search(card_html)
+    if not time_match:
+        return PublicationEvidence()
+
+    raw_text = _clean(time_match.group("text"))
+    attrs = time_match.group("attrs") or ""
+    dt_match = DATETIME_ATTR_RE.search(attrs)
+    if dt_match:
+        exact = parse_iso_publication(dt_match.group("value"), raw_text=raw_text)
+        if exact.precision != "NONE":
+            return exact
+    return parse_relative_publication(raw_text, fetched_at=fetched_at)
+
+
+def _card_is_older_than(
+    card_html: str,
+    max_age_seconds: int,
+    fetched_at: datetime | None = None,
+) -> bool:
+    fetched = fetched_at or datetime.now(UTC)
+    evidence = _extract_publication_evidence(card_html, fetched)
+    return freshness_decision(evidence, max_age_seconds, reference_time=fetched) == TOO_OLD
 
 
 def _extract_relative_age_seconds(card_html: str) -> int | None:

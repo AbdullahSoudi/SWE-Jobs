@@ -166,9 +166,8 @@ def parse_wuzzuf_html(page_html: str, page_url: str = BASE_URL) -> list[Job]:
             job_type=job_type,
             tags=tags,
             is_remote=is_remote,
+            source_job_id=_extract_source_job_id(url),
         )
-        # Dynamic attribute used by db.py if present; Job dataclass has no source_job_id field yet.
-        setattr(job, "source_job_id", _extract_source_job_id(url))
         jobs.append(job)
 
     return jobs

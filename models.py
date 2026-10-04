@@ -37,6 +37,13 @@ class Job:
     tags: list = field(default_factory=list)
     is_remote: bool = False
     original_source: str = ""  # for aggregators like JSearch
+    source_job_id: str = ""
+    published_at_raw: str = ""
+    published_at_earliest: str = ""
+    published_at_latest: str = ""
+    published_at_est: str = ""
+    published_precision: str = "NONE"
+    time_semantics: str = "UNKNOWN"
 
     @property
     def unique_id(self) -> str:

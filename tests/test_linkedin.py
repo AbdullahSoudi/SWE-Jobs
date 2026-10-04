@@ -191,3 +191,46 @@ class LinkedInFreshnessAndActiveTests(unittest.TestCase):
                 self.assertEqual(len(pending), 1)
                 self.assertEqual(pending[0].id, job_id)
                 self.assertEqual(pending[0].title, "Backend Developer")
+
+
+class LinkedInPublicationEvidenceTests(unittest.TestCase):
+    def test_exact_datetime_attribute_is_preserved(self):
+        from datetime import UTC, datetime
+
+        html = """
+        <li><a href="https://www.linkedin.com/jobs/view/backend-at-x-7777777777"></a>
+        <h3 class="base-search-card__title">Backend Developer</h3>
+        <h4 class="base-search-card__subtitle">X</h4>
+        <span class="job-search-card__location">Riyadh, Saudi Arabia</span>
+        <time datetime="2026-10-04T14:42:00Z">18 minutes ago</time></li>
+        """
+        jobs = linkedin.parse_linkedin_html(
+            html,
+            {"location": "Saudi Arabia"},
+            fetched_at=datetime(2026, 10, 4, 15, 0, tzinfo=UTC),
+        )
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].source_job_id, "7777777777")
+        self.assertEqual(jobs[0].published_at_raw, "18 minutes ago")
+        self.assertEqual(jobs[0].published_at_est, "2026-10-04T14:42:00Z")
+        self.assertEqual(jobs[0].published_precision, "EXACT")
+        self.assertEqual(jobs[0].time_semantics, "POSTED")
+
+    def test_relative_hour_keeps_uncertainty_interval(self):
+        from datetime import UTC, datetime
+
+        html = """
+        <li><a href="https://www.linkedin.com/jobs/view/data-at-x-8888888888"></a>
+        <h3 class="base-search-card__title">Data Engineer</h3>
+        <h4 class="base-search-card__subtitle">X</h4>
+        <span class="job-search-card__location">Riyadh, Saudi Arabia</span>
+        <time>1 hour ago</time></li>
+        """
+        jobs = linkedin.parse_linkedin_html(
+            html,
+            {"location": "Saudi Arabia"},
+            fetched_at=datetime(2026, 10, 4, 15, 0, tzinfo=UTC),
+        )
+        self.assertEqual(jobs[0].published_at_earliest, "2026-10-04T13:00:00Z")
+        self.assertEqual(jobs[0].published_at_latest, "2026-10-04T14:00:00Z")
+        self.assertEqual(jobs[0].published_precision, "HOUR")

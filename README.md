@@ -14,6 +14,8 @@ This version intentionally replaced the old 15-source aggregator with a narrower
 - **Per-topic send tracking**: a job is marked fully sent only after all intended topics succeed.
 - **Retry-safe**: partial Telegram failures are retried only for the failed topics.
 - **Legacy backlog safety**: old pending/retry rows are expired once instead of being replayed as fresh jobs.
+- **Freshness evidence foundation**: publication-time signals are stored with their precision instead of being forced into a fake exact timestamp.
+- **Source state foundation**: successful fetch time, baseline state, and consecutive failures are persisted per source.
 - **GitHub Actions only**: no VPS or external database required.
 - **15-minute schedule**: cron runs every 15 minutes.
 
@@ -183,11 +185,17 @@ The database tracks:
 - company
 - location
 - canonical URL
+- raw publication-time text when visible
+- earliest/latest possible publication time
+- estimated publication time and precision (`EXACT`, `MINUTE`, `HOUR`, `DAY`, `NONE`)
 - first seen time
 - last seen time
 - job send status
 - per-topic send status
 - source run status
+- last successful source fetch
+- source baseline state
+- consecutive source failures
 
 Send statuses include:
 
@@ -226,9 +234,25 @@ record topic-level result
 commit jobs.db to data branch
 ```
 
+## Freshness Evidence Foundation
+
+Schema v2 separates **what the source actually tells us** from the later send decision.
+For example, `12 minutes ago` is stored as a one-minute interval, while `1 hour ago`
+is stored as a wider hour bucket. If LinkedIn exposes an exact `datetime` attribute,
+that exact timestamp is preserved. Missing or coarse timestamps stay uncertain instead
+of being silently converted to false precision.
+
+This update does **not** yet replace the production send gate. It prepares the data and
+source state needed for the next step: `new-to-us + max_age + baseline` freshness logic
+that tolerates source indexing delay without replaying stale jobs.
+
+Existing successful sources are migrated as already baselined. A source added after
+schema v2 stays unbaselined until the runtime explicitly completes its first no-send
+baseline, preventing a new-source bootstrap flood.
+
 ## LinkedIn Freshness Rules
 
-LinkedIn requests are configured for a rolling freshness window:
+LinkedIn requests are currently configured for a rolling freshness window:
 
 ```text
 f_TPR=r3600
@@ -285,6 +309,7 @@ python main.py
 ├── config.py
 ├── models.py
 ├── db.py
+├── freshness.py
 ├── telegram_sender.py
 ├── cleanup.py
 ├── requirements.txt
@@ -296,6 +321,7 @@ python main.py
 │   └── linkedin.py
 ├── tests/
 │   ├── test_db.py
+│   ├── test_freshness.py
 │   ├── test_linkedin.py
 │   ├── test_main_sqlite.py
 │   ├── test_routing.py

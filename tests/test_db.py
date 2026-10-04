@@ -190,3 +190,92 @@ class DbLayerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreshnessSchemaV2Tests(unittest.TestCase):
+    def test_publication_evidence_round_trips_through_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            job = Job(
+                "Backend Developer",
+                "Acme",
+                "Riyadh",
+                "https://jobs.example.com/freshness",
+                "linkedin",
+                source_job_id="123",
+                published_at_raw="5 minutes ago",
+                published_at_earliest="2026-10-04T14:54:00Z",
+                published_at_latest="2026-10-04T14:55:00Z",
+                published_at_est="2026-10-04T14:55:00Z",
+                published_precision="MINUTE",
+                time_semantics="POSTED",
+            )
+            with connect(db_path) as conn:
+                upsert_job(conn, job)
+                stored = get_jobs_for_sending(conn)[0]
+                self.assertEqual(stored.source_job_id, "123")
+                self.assertEqual(stored.published_at_raw, "5 minutes ago")
+                self.assertEqual(stored.published_at_earliest, "2026-10-04T14:54:00Z")
+                self.assertEqual(stored.published_at_latest, "2026-10-04T14:55:00Z")
+                self.assertEqual(stored.published_precision, "MINUTE")
+                restored = stored.to_job()
+                self.assertEqual(restored.published_at_est, "2026-10-04T14:55:00Z")
+                self.assertEqual(restored.time_semantics, "POSTED")
+
+    def test_schema_v1_source_is_migrated_as_already_baselined(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            raw = sqlite3.connect(db_path)
+            raw.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            raw.execute("INSERT INTO metadata(key, value) VALUES ('schema_version', '1')")
+            raw.execute(
+                """
+                CREATE TABLE source_runs (
+                    source TEXT PRIMARY KEY,
+                    last_run_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'never',
+                    error TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            raw.execute(
+                "INSERT INTO source_runs(source, last_run_at, status, error, updated_at) VALUES (?, ?, 'ok', '', ?)",
+                ("linkedin", "2026-10-04T12:00:00Z", "2026-10-04T12:00:00Z"),
+            )
+            raw.commit()
+            raw.close()
+
+            with connect(db_path) as conn:
+                row = conn.execute("SELECT * FROM source_runs WHERE source = 'linkedin'").fetchone()
+                self.assertEqual(row["last_success_at"], "2026-10-04T12:00:00Z")
+                self.assertEqual(row["baselined_at"], "2026-10-04T12:00:00Z")
+                self.assertEqual(get_metadata(conn, "schema_version"), "2")
+
+    def test_new_source_does_not_auto_baseline_across_reconnects(self):
+        from db import is_source_baselined, mark_source_baselined
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            with connect(db_path) as conn:
+                update_source_run(conn, "new-saudi-source", "ok", last_run_at="2026-10-04T15:00:00Z")
+                self.assertFalse(is_source_baselined(conn, "new-saudi-source"))
+
+            with connect(db_path) as conn:
+                self.assertFalse(is_source_baselined(conn, "new-saudi-source"))
+                mark_source_baselined(conn, "new-saudi-source", "2026-10-04T15:01:00Z")
+                self.assertTrue(is_source_baselined(conn, "new-saudi-source"))
+
+    def test_failed_run_preserves_last_success_and_counts_failures(self):
+        from db import get_source_last_success, get_source_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            with connect(db_path) as conn:
+                update_source_run(conn, "linkedin", "ok", last_run_at="2026-10-04T15:00:00Z")
+                update_source_run(conn, "linkedin", "failed", "timeout", last_run_at="2026-10-04T15:15:00Z")
+                state = get_source_state(conn, "linkedin")
+                self.assertEqual(get_source_last_success(conn, "linkedin"), "2026-10-04T15:00:00Z")
+                self.assertEqual(state["last_run_at"], "2026-10-04T15:15:00Z")
+                self.assertEqual(state["consecutive_failures"], 1)
+                self.assertEqual(state["status"], "failed")

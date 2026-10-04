@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from models import Job
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -60,6 +60,12 @@ class StoredJob:
     original_source: str
     content_hash: str
     send_status: str
+    published_at_raw: str
+    published_at_earliest: str
+    published_at_latest: str
+    published_at_est: str
+    published_precision: str
+    time_semantics: str
     first_seen_at: str
     last_seen_at: str
 
@@ -75,6 +81,13 @@ class StoredJob:
             tags=self.tags,
             is_remote=self.is_remote,
             original_source=self.original_source,
+            source_job_id=self.source_job_id,
+            published_at_raw=self.published_at_raw,
+            published_at_earliest=self.published_at_earliest,
+            published_at_latest=self.published_at_latest,
+            published_at_est=self.published_at_est,
+            published_precision=self.published_precision,
+            time_semantics=self.time_semantics,
         )
 
 
@@ -129,6 +142,12 @@ def init_db(conn: sqlite3.Connection) -> None:
             original_source TEXT DEFAULT '',
             content_hash TEXT NOT NULL UNIQUE,
             send_status TEXT NOT NULL DEFAULT 'pending',
+            published_at_raw TEXT DEFAULT '',
+            published_at_earliest TEXT DEFAULT '',
+            published_at_latest TEXT DEFAULT '',
+            published_at_est TEXT DEFAULT '',
+            published_precision TEXT NOT NULL DEFAULT 'NONE',
+            time_semantics TEXT NOT NULL DEFAULT 'UNKNOWN',
             first_seen_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL
         );
@@ -157,16 +176,66 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS source_runs (
             source TEXT PRIMARY KEY,
             last_run_at TEXT,
+            last_success_at TEXT,
+            baselined_at TEXT,
             status TEXT NOT NULL DEFAULT 'never',
             error TEXT DEFAULT '',
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         );
         """
     )
+    previous_row = conn.execute(
+        "SELECT value FROM metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    previous_version = int(previous_row["value"]) if previous_row else 0
+    _migrate_schema(conn, previous_version=previous_version)
     conn.execute(
         "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
         ("schema_version", str(SCHEMA_VERSION)),
     )
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, definition: str) -> None:
+    column = definition.split()[0]
+    if column not in _column_names(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+
+def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
+    """Apply additive migrations so existing jobs.db files remain usable."""
+    for definition in (
+        "published_at_raw TEXT DEFAULT ''",
+        "published_at_earliest TEXT DEFAULT ''",
+        "published_at_latest TEXT DEFAULT ''",
+        "published_at_est TEXT DEFAULT ''",
+        "published_precision TEXT NOT NULL DEFAULT 'NONE'",
+        "time_semantics TEXT NOT NULL DEFAULT 'UNKNOWN'",
+    ):
+        _ensure_column(conn, "jobs", definition)
+
+    for definition in (
+        "last_success_at TEXT",
+        "baselined_at TEXT",
+        "consecutive_failures INTEGER NOT NULL DEFAULT 0",
+    ):
+        _ensure_column(conn, "source_runs", definition)
+
+    # Only schema-v1 databases have legacy successful sources that predate
+    # explicit baselining. Do not auto-baseline sources created after v2.
+    if previous_version < 2:
+        conn.execute(
+            """
+            UPDATE source_runs
+            SET last_success_at = COALESCE(last_success_at, last_run_at, updated_at),
+                baselined_at = COALESCE(baselined_at, last_run_at, updated_at)
+            WHERE status = 'ok'
+            """
+        )
 
 
 def now_utc() -> str:
@@ -304,7 +373,7 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
     ts = now_utc()
     canonical_url = canonicalize_url(job.url)
     content_hash = job_content_hash(job)
-    source_job_id = str(getattr(job, "source_job_id", "") or "")
+    source_job_id = str(job.source_job_id or "")
     tags_json = json.dumps(job.tags or [], ensure_ascii=False, sort_keys=True)
 
     existing = conn.execute(
@@ -319,7 +388,14 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             UPDATE jobs
             SET source = ?, source_job_id = ?, title = ?, company = ?, location = ?,
                 url = ?, canonical_url = ?, salary = ?, job_type = ?, tags_json = ?,
-                is_remote = ?, original_source = ?, last_seen_at = ?
+                is_remote = ?, original_source = ?,
+                published_at_raw = COALESCE(NULLIF(?, ''), published_at_raw),
+                published_at_earliest = COALESCE(NULLIF(?, ''), published_at_earliest),
+                published_at_latest = COALESCE(NULLIF(?, ''), published_at_latest),
+                published_at_est = COALESCE(NULLIF(?, ''), published_at_est),
+                published_precision = CASE WHEN ? != 'NONE' THEN ? ELSE published_precision END,
+                time_semantics = CASE WHEN ? != 'UNKNOWN' THEN ? ELSE time_semantics END,
+                last_seen_at = ?
             WHERE id = ?
             """,
             (
@@ -335,6 +411,14 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
                 tags_json,
                 1 if job.is_remote else 0,
                 job.original_source or "",
+                job.published_at_raw or "",
+                job.published_at_earliest or "",
+                job.published_at_latest or "",
+                job.published_at_est or "",
+                job.published_precision or "NONE",
+                job.published_precision or "NONE",
+                job.time_semantics or "UNKNOWN",
+                job.time_semantics or "UNKNOWN",
                 ts,
                 job_id,
             ),
@@ -346,9 +430,11 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
         INSERT INTO jobs (
             source, source_job_id, title, company, location, url, canonical_url,
             salary, job_type, tags_json, is_remote, original_source,
-            content_hash, send_status, first_seen_at, last_seen_at
+            content_hash, send_status, published_at_raw, published_at_earliest,
+            published_at_latest, published_at_est, published_precision, time_semantics,
+            first_seen_at, last_seen_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job.source,
@@ -364,6 +450,12 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             1 if job.is_remote else 0,
             job.original_source or "",
             content_hash,
+            job.published_at_raw or "",
+            job.published_at_earliest or "",
+            job.published_at_latest or "",
+            job.published_at_est or "",
+            job.published_precision or "NONE",
+            job.time_semantics or "UNKNOWN",
             ts,
             ts,
         ),
@@ -448,20 +540,63 @@ def update_source_run(
     error: str = "",
     last_run_at: Optional[str] = None,
 ) -> None:
-    """Record source run health/timing."""
+    """Record source run health/timing without implicitly baselining new sources."""
     ts = now_utc()
+    run_at = last_run_at or ts
+    is_ok = status == "ok"
     conn.execute(
         """
-        INSERT INTO source_runs(source, last_run_at, status, error, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO source_runs(
+            source, last_run_at, last_success_at, baselined_at, status, error,
+            consecutive_failures, updated_at
+        )
+        VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
         ON CONFLICT(source) DO UPDATE SET
             last_run_at = excluded.last_run_at,
+            last_success_at = CASE
+                WHEN excluded.status = 'ok' THEN excluded.last_run_at
+                ELSE source_runs.last_success_at
+            END,
             status = excluded.status,
             error = excluded.error,
+            consecutive_failures = CASE
+                WHEN excluded.status = 'ok' THEN 0
+                ELSE source_runs.consecutive_failures + 1
+            END,
             updated_at = excluded.updated_at
         """,
-        (source, last_run_at or ts, status, error or "", ts),
+        (source, run_at, run_at if is_ok else None, status, error or "", 0 if is_ok else 1, ts),
     )
+
+
+def get_source_state(conn: sqlite3.Connection, source: str) -> Optional[sqlite3.Row]:
+    """Return the persisted state row for a source."""
+    return conn.execute("SELECT * FROM source_runs WHERE source = ?", (source,)).fetchone()
+
+
+def is_source_baselined(conn: sqlite3.Connection, source: str) -> bool:
+    """Return whether a source has completed its initial no-send baseline."""
+    row = get_source_state(conn, source)
+    return bool(row and row["baselined_at"])
+
+
+def mark_source_baselined(
+    conn: sqlite3.Connection,
+    source: str,
+    baselined_at: Optional[str] = None,
+) -> None:
+    """Mark a source baseline explicitly after its initial results are stored."""
+    ts = baselined_at or now_utc()
+    conn.execute(
+        "UPDATE source_runs SET baselined_at = ?, updated_at = ? WHERE source = ?",
+        (ts, now_utc(), source),
+    )
+
+
+def get_source_last_success(conn: sqlite3.Connection, source: str) -> Optional[str]:
+    """Return the last successful source fetch timestamp, if available."""
+    row = get_source_state(conn, source)
+    return str(row["last_success_at"]) if row and row["last_success_at"] else None
 
 
 def get_source_last_run(conn: sqlite3.Connection, source: str) -> Optional[str]:
@@ -503,6 +638,12 @@ def _row_to_stored_job(row: sqlite3.Row) -> StoredJob:
         original_source=row["original_source"] or "",
         content_hash=row["content_hash"],
         send_status=row["send_status"],
+        published_at_raw=row["published_at_raw"] or "",
+        published_at_earliest=row["published_at_earliest"] or "",
+        published_at_latest=row["published_at_latest"] or "",
+        published_at_est=row["published_at_est"] or "",
+        published_precision=row["published_precision"] or "NONE",
+        time_semantics=row["time_semantics"] or "UNKNOWN",
         first_seen_at=row["first_seen_at"],
         last_seen_at=row["last_seen_at"],
     )
