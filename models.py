@@ -44,6 +44,10 @@ class Job:
     published_at_est: str = ""
     published_precision: str = "NONE"
     time_semantics: str = "UNKNOWN"
+    description: str = ""
+    eligibility: str = "NOT_SPECIFIED"
+    eligibility_evidence: str = ""
+    eligibility_source: str = ""
 
     @property
     def unique_id(self) -> str:

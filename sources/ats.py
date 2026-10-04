@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from freshness import parse_iso_publication, parse_relative_publication
 from locations import normalize_saudi_location
 from models import Job
+from eligibility import html_to_text
 
 try:
     from sources.http_utils import get_json, post_json
@@ -22,6 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - flat local imports
 log = logging.getLogger(__name__)
 
 GREENHOUSE_URL = "https://boards-api.greenhouse.io/v1/boards/{tenant}/jobs"
+GREENHOUSE_JOB_URL = "https://boards-api.greenhouse.io/v1/boards/{tenant}/jobs/{job_id}"
 LEVER_URL = "https://api.lever.co/v0/postings/{tenant}"
 ASHBY_URL = "https://api.ashbyhq.com/posting-api/job-board/{tenant}"
 WORKDAY_PAGE_SIZE = 20
@@ -118,6 +120,12 @@ def fetch_greenhouse_company(
             "published_precision": "NONE",
             "time_semantics": "UPDATED" if row.get("updated_at") else "UNKNOWN",
         }
+        content = _clean(row.get("content"))
+        if not content:
+            detail = getter(GREENHOUSE_JOB_URL.format(tenant=tenant, job_id=source_job_id))
+            if isinstance(detail, dict):
+                content = _clean(detail.get("content"))
+
         jobs.append(Job(
             title=title,
             company=company,
@@ -126,11 +134,36 @@ def fetch_greenhouse_company(
             source=source_key,
             source_job_id=source_job_id,
             original_source=_source_label(company),
+            description=html_to_text(content),
             **publication,
         ))
 
     log.info("ATS Greenhouse %s: fetched %s Saudi postings.", company, len(jobs))
     return jobs
+
+
+def _lever_description(row: dict) -> str:
+    parts: list[str] = []
+    for key in ("descriptionPlain", "additionalPlain"):
+        value = _clean(row.get(key))
+        if value:
+            parts.append(value)
+    if not parts:
+        for key in ("description", "additional"):
+            value = html_to_text(_clean(row.get(key)))
+            if value:
+                parts.append(value)
+    lists = row.get("lists")
+    if isinstance(lists, list):
+        for item in lists:
+            if not isinstance(item, dict):
+                continue
+            heading = _clean(item.get("text"))
+            content = html_to_text(_clean(item.get("content")))
+            joined = _join_nonempty((heading, content))
+            if joined:
+                parts.append(joined)
+    return "\n".join(dict.fromkeys(part for part in parts if part))
 
 
 def fetch_lever_company(
@@ -198,6 +231,7 @@ def fetch_lever_company(
             job_type=_join_nonempty((commitment, workplace)),
             tags=tags,
             is_remote=workplace.lower() == "remote",
+            description=_lever_description(row),
         ))
 
     log.info("ATS Lever %s: fetched %s Saudi postings.", company, len(jobs))
@@ -270,6 +304,11 @@ def fetch_ashby_company(
             job_type=_join_nonempty((employment, workplace)),
             tags=tags,
             is_remote=bool(row.get("isRemote")) or workplace.lower() == "remote",
+            description=(
+                _clean(row.get("descriptionPlain"))
+                or html_to_text(_clean(row.get("descriptionHtml")))
+                or html_to_text(_clean(row.get("description")))
+            ),
             **publication,
         ))
 

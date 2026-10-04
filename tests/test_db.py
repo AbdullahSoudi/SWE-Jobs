@@ -104,6 +104,69 @@ class DbLayerTests(unittest.TestCase):
                 set_job_send_status(conn, job_id, "sent")
                 self.assertEqual(get_jobs_for_sending(conn), [])
 
+
+    def test_description_and_eligibility_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            with connect(db_path) as conn:
+                job = Job(
+                    title="Backend Platform Engineer",
+                    company="Acme",
+                    location="Riyadh, Saudi Arabia",
+                    url="https://jobs.example.com/eligibility",
+                    source="ats_greenhouse_acme",
+                    description="Saudi nationals only. Build APIs.",
+                    eligibility="SAUDI_ONLY",
+                    eligibility_evidence="Saudi nationals only",
+                    eligibility_source="ats_greenhouse_acme",
+                )
+                job_id, _ = upsert_job(conn, job)
+                stored = get_jobs_for_sending(conn)[0]
+                loaded = stored.to_job()
+                self.assertEqual(stored.id, job_id)
+                self.assertEqual(loaded.description, "Saudi nationals only. Build APIs.")
+                self.assertEqual(loaded.eligibility, "SAUDI_ONLY")
+                self.assertEqual(loaded.eligibility_evidence, "Saudi nationals only")
+                self.assertEqual(loaded.eligibility_source, "ats_greenhouse_acme")
+
+    def test_cross_source_ats_can_upgrade_missing_eligibility(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            with connect(db_path) as conn:
+                linkedin = Job(
+                    title="Senior Backend Platform Engineer",
+                    company="Acme",
+                    location="Riyadh, Saudi Arabia",
+                    url="https://www.linkedin.com/jobs/view/1234567890",
+                    source="linkedin",
+                )
+                job_id, is_new = upsert_job(conn, linkedin)
+                self.assertTrue(is_new)
+
+                ats = Job(
+                    title="Senior Backend Platform Engineer",
+                    company="Acme",
+                    location="Riyadh, Saudi Arabia",
+                    url="https://job-boards.greenhouse.io/acme/jobs/42",
+                    source="ats_greenhouse_acme",
+                    source_job_id="42",
+                    description="Applications are open to all nationalities.",
+                    eligibility="EXPLICITLY_OPEN",
+                    eligibility_evidence="Applications are open to all nationalities",
+                    eligibility_source="ats_greenhouse_acme",
+                )
+                ats_job_id, ats_is_new = upsert_job(conn, ats)
+                self.assertFalse(ats_is_new)
+                self.assertEqual(ats_job_id, job_id)
+                row = conn.execute(
+                    "SELECT description, eligibility, eligibility_evidence, eligibility_source FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                self.assertEqual(row["eligibility"], "EXPLICITLY_OPEN")
+                self.assertEqual(row["eligibility_source"], "ats_greenhouse_acme")
+                self.assertIn("all nationalities", row["eligibility_evidence"].lower())
+                self.assertIn("all nationalities", row["description"].lower())
+
     def test_record_topic_send_and_source_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "jobs.db")
@@ -299,7 +362,7 @@ class FreshnessSchemaV3Tests(unittest.TestCase):
                 row = conn.execute("SELECT * FROM source_runs WHERE source = 'linkedin'").fetchone()
                 self.assertEqual(row["last_success_at"], "2026-10-04T12:00:00Z")
                 self.assertEqual(row["baselined_at"], "2026-10-04T12:00:00Z")
-                self.assertEqual(get_metadata(conn, "schema_version"), "8")
+                self.assertEqual(get_metadata(conn, "schema_version"), "9")
 
     def test_new_source_does_not_auto_baseline_across_reconnects(self):
         from db import is_source_baselined, mark_source_baselined

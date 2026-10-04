@@ -116,6 +116,43 @@ class MainSqliteFlowTests(unittest.TestCase):
                 self.assertEqual(rows[1]["send_status"], "sent")
                 self.assertEqual(rows[1]["freshness_status"], "FRESH")
 
+
+    def test_saudi_eligibility_is_enriched_before_persistence_and_delivery(self):
+        job = self.fresh_job(
+            title="Backend Developer",
+            url="https://www.linkedin.com/jobs/view/9999000011",
+            source="linkedin",
+            at=self.now,
+        )
+        job.description = "This position is open to Saudi nationals only."
+        delivered = []
+
+        def sender(job_obj, topics):
+            delivered.append(job_obj)
+            return {topic: True for topic in topics}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "linkedin")
+            summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("LinkedIn", lambda: [job])],
+                sender=sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(summary.topic_send_successes, 1)
+            self.assertEqual(delivered[0].eligibility, "SAUDI_ONLY")
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT eligibility, eligibility_evidence, eligibility_source FROM jobs"
+                ).fetchone()
+                self.assertEqual(row["eligibility"], "SAUDI_ONLY")
+                self.assertIn("Saudi nationals only", row["eligibility_evidence"])
+                self.assertEqual(row["eligibility_source"], "linkedin")
+
     def test_partial_send_retries_only_unsent_topics_without_duplicates(self):
         job = Job(
             title="Backend Developer",

@@ -37,6 +37,7 @@ except ModuleNotFoundError:  # local flat-file test layout
     from __init__ import ALL_FETCHERS, SOURCE_POLL_INTERVAL_MINUTES
 from models import Job, is_programming_job, passes_geo_filter
 from classifier import is_tech_job
+from eligibility import enrich_job_eligibility
 from telegram_sender import (
     CONFIG_ERROR,
     RATE_LIMITED,
@@ -339,6 +340,7 @@ def persist_filtered_jobs(
 
     for job in filtered:
         source_key = _source_key(job.source)
+        enrich_job_eligibility(job)
         metrics = source_metrics.setdefault(source_key, SourceCycleMetrics(status="ok"))
         context = source_context.get(source_key, SourceContext(False, None))
         policy = _policy_for_source(source_key)

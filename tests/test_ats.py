@@ -20,6 +20,7 @@ class ATSAdapterTests(unittest.TestCase):
                     "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/101",
                     "first_published": "2026-10-04T18:00:00Z",
                     "updated_at": "2026-10-04T19:00:00Z",
+                    "content": "<p>Saudi nationals only</p><p>Build APIs</p>",
                 },
                 {
                     "id": 102,
@@ -44,6 +45,7 @@ class ATSAdapterTests(unittest.TestCase):
         self.assertEqual(job.time_semantics, "POSTED")
         self.assertEqual(job.published_precision, "EXACT")
         self.assertEqual(job.published_at_est, "2026-10-04T18:00:00Z")
+        self.assertEqual(job.description, "Saudi nationals only\nBuild APIs")
 
     def test_greenhouse_falls_back_to_snapshot_when_first_published_is_missing(self):
         payload = {
@@ -81,6 +83,7 @@ class ATSAdapterTests(unittest.TestCase):
                 },
                 "hostedUrl": "https://jobs.lever.co/acme/lever-1",
                 "workplaceType": "on-site",
+                "descriptionPlain": "Open to all nationalities. Secure our platform.",
             },
             {
                 "id": "lever-2",
@@ -109,6 +112,7 @@ class ATSAdapterTests(unittest.TestCase):
         self.assertIn("Technology", job.tags)
         self.assertIn("Full-Time", job.job_type)
         self.assertFalse(job.is_remote)
+        self.assertIn("Open to all nationalities", job.description)
 
     def test_ashby_preserves_exact_published_at_and_filters_non_saudi(self):
         payload = {
@@ -130,6 +134,7 @@ class ATSAdapterTests(unittest.TestCase):
                     "address": {"postalAddress": {"addressCountry": "UAE"}},
                     "jobUrl": "https://jobs.ashbyhq.com/acme/abc-123",
                     "applyUrl": "https://jobs.ashbyhq.com/acme/abc-123/application",
+                    "descriptionHtml": "<p>Work visa sponsorship is provided.</p>",
                 },
                 {
                     "title": "Software Engineer",
@@ -162,6 +167,7 @@ class ATSAdapterTests(unittest.TestCase):
         self.assertEqual(job.published_at_est, "2026-10-04T18:21:55Z")
         self.assertTrue(job.is_remote)
         self.assertIn("Engineering", job.tags)
+        self.assertEqual(job.description, "Work visa sponsorship is provided.")
 
 
 

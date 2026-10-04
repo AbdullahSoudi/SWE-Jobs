@@ -18,6 +18,7 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Durable Telegram outbox:** delivery state is written before the network call.
 - **Measured bilingual classifier:** English + Arabic tech-title classification drives both broad LinkedIn filtering and the single primary Telegram topic.
 - **Market/source as metadata:** Egypt/Saudi/Remote and the source are shown in the message instead of creating duplicate topic posts.
+- **Evidence-based Saudi eligibility:** explicit Saudi-only/open-to-non-Saudi text is extracted from available job descriptions; silence stays `NOT_SPECIFIED`.
 - **Telegram backpressure:** rate limiting, `retry_after`, bounded transient retries, and ambiguous-timeout protection.
 - **GitHub Actions:** runs every 15 minutes and persists `jobs.db` on the `data` branch.
 
@@ -89,7 +90,7 @@ companies/saudi_ats.json
 
 `company_registry.py` validates the registry and builds one source fetcher per employer. This gives each company its own source health/freshness/observation metrics instead of hiding all ATS traffic behind one aggregate source.
 
-The adapters live in `sources/ats.py` and use public career-site read endpoints only. Greenhouse preserves `first_published` when the public feed provides it, falling back to snapshot observation when it does not. Lever remains snapshot-based because its public v0 posting timestamp is not reliable enough for our freshness gate. Ashby preserves `publishedAt`. Workday uses the public CXS endpoint (`POST /wday/cxs/{tenant}/{site}/jobs`) with the platform's hard page size of 20. To avoid crawling thousands of global postings, each Workday registry entry searches only Saudi-oriented terms such as `Riyadh`, `Saudi Arabia`, and `KSA`, then validates the returned location locally. If a Workday search exceeds the configured page cap, the adapter fails closed instead of treating a truncated/re-ranked result set as a trustworthy freshness snapshot. Lever `allLocations` and Ashby secondary locations are inspected so a Saudi location is not lost when it is not the primary display location. Global company boards are always filtered to explicit Saudi locations before the tech classifier runs.
+The adapters live in `sources/ats.py` and use public career-site read endpoints only. Greenhouse preserves `first_published` when the public feed provides it, falling back to snapshot observation when it does not. For Saudi rows only, Greenhouse may make a public single-job detail request to retain the description for internal eligibility evidence; it does not download full descriptions for the entire global board. Lever and Ashby preserve description text already present in their public payloads. Lever remains snapshot-based because its public v0 posting timestamp is not reliable enough for our freshness gate. Ashby preserves `publishedAt`. Workday uses the public CXS endpoint (`POST /wday/cxs/{tenant}/{site}/jobs`) with the platform's hard page size of 20. To avoid crawling thousands of global postings, each Workday registry entry searches only Saudi-oriented terms such as `Riyadh`, `Saudi Arabia`, and `KSA`, then validates the returned location locally. If a Workday search exceeds the configured page cap, the adapter fails closed instead of treating a truncated/re-ranked result set as a trustworthy freshness snapshot. Lever `allLocations` and Ashby secondary locations are inspected so a Saudi location is not lost when it is not the primary display location. Global company boards are always filtered to explicit Saudi locations before the tech classifier runs.
 
 ### ATS discovery helper
 
@@ -122,6 +123,20 @@ The current V2 source is not in `PRODUCTION_SOURCE_KEYS`, so it can populate met
 `classifier.py` is the deterministic routing/filtering baseline. It supports English and Arabic tech titles, uses strong non-tech exclusions, and returns exactly one topic or `not tech`. A golden test set currently covers representative Backend, Frontend, Mobile, Data & AI, DevOps, QA, Cybersecurity, ERP, Internship, general-tech, Arabic, and non-tech cases. The dataset is intentionally small to start and should be expanded from real production misses/false positives.
 
 `locations.py` normalizes common Saudi Arabic/English city variants (for example Riyadh/الرياض, Jeddah/Jiddah/جدة, Khobar/الخبر, Dammam/الدمام, NEOM/نيوم). Location remains metadata, not a routing dimension. Messages can include city hashtags such as `#Riyadh` without creating extra Telegram topics.
+
+## Saudi Eligibility Metadata
+
+`eligibility.py` is deliberately evidence-based. It never infers nationality eligibility from the employer, sector, or the absence of a restriction. Each Saudi job is classified as exactly one of:
+
+```text
+SAUDI_ONLY
+EXPLICITLY_OPEN
+NOT_SPECIFIED
+```
+
+Examples of strong evidence include `Saudi nationals only`, `must be Saudi`, `للسعوديين فقط`, and Tamheer for `SAUDI_ONLY`; and `all nationalities`, `non-Saudis welcome`, `visa sponsorship is provided`, or `جميع الجنسيات` for `EXPLICITLY_OPEN`. Phrases such as `Saudi nationals preferred` do **not** become Saudi-only.
+
+The matched evidence sentence and source key are stored in SQLite for audit, while Telegram stays compact. Saudi messages show one eligibility line and optional hashtags such as `#SaudiOnly` or `#OpenEligibility`; eligibility is metadata and never creates another Telegram topic. Full descriptions remain internal and are not posted to the group.
 
 ## Shadow Mode and Source Metrics
 
@@ -316,6 +331,7 @@ Each attempt is recorded in `delivery_attempts` with useful debugging fields suc
 - normalized job/posting data;
 - source job IDs and canonical URLs;
 - freshness evidence and decision reason;
+- internal description text when a public source provides it, plus eligibility classification/evidence;
 - first/last seen times;
 - source baseline, shadow/production state, and latest health counters;
 - append-only per-source run history and metrics;
@@ -336,6 +352,8 @@ restore jobs.db from data branch
 fetch WUZZUF + LinkedIn + shadow Saudi ATS feeds
     ↓
 quality + geography filtering
+    ↓
+Saudi eligibility enrichment from explicit evidence
     ↓
 freshness gate
     ├─ baseline → store, no send
@@ -358,7 +376,7 @@ save jobs.db to data branch
 
 ## Source Analytics (Shadow Evaluation)
 
-Schema v6 introduced source observations, v7 added persisted source scheduling/health state, and the current schema is v8 with posting-level identity plus conservative cross-source job clustering.
+Schema v6 introduced source observations, v7 added persisted source scheduling/health state, v8 added posting-level identity plus conservative cross-source job clustering, and the current schema is v9 with internal description/eligibility evidence fields.
 This lets the bot compare production LinkedIn with `linkedin_saudi_v2` without
 credit depending on which source happened to be processed first. No historical
 source-discovery order is fabricated; observation analytics starts when v6 is deployed.
@@ -386,7 +404,7 @@ The raw/relevant run counters are source-wide. The discovery/first/exclusive
 metrics honor `--saudi-only`, so they are the fair part of the Saudi V2 comparison.
 
 
-### Cross-source deduplication (schema v8)
+### Cross-source deduplication (introduced in schema v8)
 
 `jobs` now represents a real-world opening/cluster while `job_postings` keeps every source-specific posting that points to it. Source identity is checked first using `(source, source_job_id)` or the canonical URL. Only previously unseen postings are considered for conservative cross-source clustering.
 
@@ -468,6 +486,7 @@ python main.py
 ├── models.py
 ├── db.py
 ├── freshness.py
+├── eligibility.py
 ├── dedup.py
 ├── source_analytics.py
 ├── source_runtime.py
@@ -494,6 +513,7 @@ python main.py
 │   ├── test_company_registry.py
 │   ├── test_db.py
 │   ├── test_dedup.py
+│   ├── test_eligibility.py
 │   ├── test_freshness.py
 │   ├── test_linkedin.py
 │   ├── test_jobzaty.py

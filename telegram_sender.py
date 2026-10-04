@@ -19,6 +19,7 @@ import requests
 from models import Job
 from classifier import classify_job
 from locations import saudi_location_hashtags
+from eligibility import SAUDI_ONLY, EXPLICITLY_OPEN, NOT_SPECIFIED
 from config import (
     CHANNELS,
     PRIMARY_TOPIC_ORDER,
@@ -122,6 +123,12 @@ def _market_hashtags(job: Job) -> list[str]:
     if not tags and _is_egypt_job(job):
         tags.append("#Egypt")
 
+    if _is_saudi_job(job):
+        if job.eligibility == SAUDI_ONLY:
+            tags.append("#SaudiOnly")
+        elif job.eligibility == EXPLICITLY_OPEN:
+            tags.append("#OpenEligibility")
+
     location = (job.location or "").lower()
     if job.is_remote or "remote" in location or "عن بعد" in location:
         tags.append("#Remote")
@@ -147,6 +154,14 @@ def format_job_message(job: Job) -> str:
         lines.append(f"📋 {_escape_html(job.job_type)}")
     if job.is_remote:
         lines.append("🌍 Remote")
+
+    if _is_saudi_job(job):
+        if job.eligibility == SAUDI_ONLY:
+            lines.append("🇸🇦 Eligibility: Saudi nationals only (stated)")
+        elif job.eligibility == EXPLICITLY_OPEN:
+            lines.append("🌍 Eligibility: Explicitly open to non-Saudis (stated)")
+        else:
+            lines.append("👤 Eligibility: Not specified")
 
     lines.append("")
     lines.append(f'🔗 <a href="{_escape_html(job.url, quote=True)}">Apply Now</a>')

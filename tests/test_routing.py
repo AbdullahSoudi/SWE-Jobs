@@ -104,6 +104,42 @@ class TelegramRoutingTests(unittest.TestCase):
         self.assertIn("#SaudiArabia", message)
         self.assertNotIn("#Egypt", message)
 
+
+    def test_saudi_eligibility_is_metadata_not_a_topic(self):
+        saudi_only = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url="https://example.com/saudi-only",
+            source="linkedin",
+            eligibility="SAUDI_ONLY",
+        )
+        message = format_job_message(saudi_only)
+        self.assertIn("Eligibility: Saudi nationals only", message)
+        self.assertIn("#SaudiOnly", message)
+        self.assertEqual(route_job(saudi_only), ["backend"])
+
+        explicitly_open = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url="https://example.com/open",
+            source="linkedin",
+            eligibility="EXPLICITLY_OPEN",
+        )
+        open_message = format_job_message(explicitly_open)
+        self.assertIn("Explicitly open to non-Saudis", open_message)
+        self.assertIn("#OpenEligibility", open_message)
+
+        unspecified = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Riyadh, Saudi Arabia",
+            url="https://example.com/unknown",
+            source="linkedin",
+        )
+        self.assertIn("Eligibility: Not specified", format_job_message(unspecified))
+
     def test_send_job_records_false_for_unconfigured_topic(self):
         import telegram_sender
 

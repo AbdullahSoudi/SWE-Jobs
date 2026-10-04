@@ -55,6 +55,7 @@ class ReadmeDocumentationTests(unittest.TestCase):
             "test_ats_detector.py",
             "test_company_registry.py",
             "test_db.py",
+            "test_eligibility.py",
             "test_freshness.py",
             "test_linkedin.py",
             "test_jobzaty.py",

@@ -23,7 +23,7 @@ from models import Job
 from dedup import find_cross_source_match, source_trust
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -61,6 +61,10 @@ class StoredJob:
     tags: list
     is_remote: bool
     original_source: str
+    description: str
+    eligibility: str
+    eligibility_evidence: str
+    eligibility_source: str
     content_hash: str
     send_status: str
     published_at_raw: str
@@ -87,6 +91,10 @@ class StoredJob:
             is_remote=self.is_remote,
             original_source=self.preferred_source or self.original_source,
             source_job_id=self.source_job_id,
+            description=self.description,
+            eligibility=self.eligibility,
+            eligibility_evidence=self.eligibility_evidence,
+            eligibility_source=self.eligibility_source,
             published_at_raw=self.published_at_raw,
             published_at_earliest=self.published_at_earliest,
             published_at_latest=self.published_at_latest,
@@ -147,6 +155,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             tags_json TEXT DEFAULT '[]',
             is_remote INTEGER DEFAULT 0,
             original_source TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            eligibility TEXT NOT NULL DEFAULT 'NOT_SPECIFIED',
+            eligibility_evidence TEXT DEFAULT '',
+            eligibility_source TEXT DEFAULT '',
             content_hash TEXT NOT NULL UNIQUE,
             send_status TEXT NOT NULL DEFAULT 'pending',
             published_at_raw TEXT DEFAULT '',
@@ -345,6 +357,14 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
     for definition in (
         "preferred_url TEXT DEFAULT ''",
         "preferred_source TEXT DEFAULT ''",
+    ):
+        _ensure_column(conn, "jobs", definition)
+
+    for definition in (
+        "description TEXT DEFAULT ''",
+        "eligibility TEXT NOT NULL DEFAULT 'NOT_SPECIFIED'",
+        "eligibility_evidence TEXT DEFAULT ''",
+        "eligibility_source TEXT DEFAULT ''",
     ):
         _ensure_column(conn, "jobs", definition)
 
@@ -600,6 +620,14 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
                 ),
             )
 
+    if previous_version < 9:
+        # Eligibility classification starts prospectively. Historical rows did
+        # not persist descriptions/evidence, so keep them NOT_SPECIFIED rather
+        # than inventing a backfill from titles alone.
+        conn.execute(
+            "UPDATE jobs SET eligibility = 'NOT_SPECIFIED' WHERE eligibility IS NULL OR eligibility = ''"
+        )
+
 def now_utc() -> str:
     """Return an ISO-8601 UTC timestamp without microseconds."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -823,6 +851,55 @@ def _maybe_upgrade_preferred_link(
     )
 
 
+def _maybe_upgrade_enrichment(
+    conn: sqlite3.Connection,
+    job_id: int,
+    job: Job,
+) -> None:
+    """Attach richer description/eligibility evidence without weakening certainty.
+
+    Silence never overwrites explicit eligibility. Conflicting explicit evidence
+    only replaces the current value when the incoming source has higher trust.
+    """
+    row = conn.execute(
+        "SELECT description, eligibility, eligibility_evidence, eligibility_source FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return
+
+    updates: dict[str, str] = {}
+    incoming_description = str(getattr(job, "description", "") or "").strip()
+    if incoming_description and not str(row["description"] or "").strip():
+        updates["description"] = incoming_description
+
+    incoming_eligibility = str(getattr(job, "eligibility", "") or "NOT_SPECIFIED")
+    incoming_evidence = str(getattr(job, "eligibility_evidence", "") or "").strip()
+    incoming_source = str(getattr(job, "eligibility_source", "") or job.source or "")
+    current_eligibility = str(row["eligibility"] or "NOT_SPECIFIED")
+    current_evidence = str(row["eligibility_evidence"] or "")
+    current_source = str(row["eligibility_source"] or "")
+
+    if incoming_eligibility != "NOT_SPECIFIED":
+        should_replace = current_eligibility == "NOT_SPECIFIED"
+        if current_eligibility == incoming_eligibility and not current_evidence and incoming_evidence:
+            should_replace = True
+        if current_eligibility not in {"NOT_SPECIFIED", incoming_eligibility}:
+            should_replace = source_trust(incoming_source) > source_trust(current_source)
+        if should_replace:
+            updates["eligibility"] = incoming_eligibility
+            updates["eligibility_evidence"] = incoming_evidence
+            updates["eligibility_source"] = incoming_source
+
+    if not updates:
+        return
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    conn.execute(
+        f"UPDATE jobs SET {assignments} WHERE id = ?",
+        (*updates.values(), job_id),
+    )
+
+
 def _refresh_cluster_from_primary_source(
     conn: sqlite3.Connection,
     job_id: int,
@@ -838,6 +915,7 @@ def _refresh_cluster_from_primary_source(
     if str(row["source"] or "") != str(job.source or ""):
         conn.execute("UPDATE jobs SET last_seen_at = ? WHERE id = ?", (timestamp, job_id))
         _maybe_upgrade_preferred_link(conn, job_id, job)
+        _maybe_upgrade_enrichment(conn, job_id, job)
         return
 
     tags_json = json.dumps(job.tags or [], ensure_ascii=False, sort_keys=True)
@@ -880,6 +958,7 @@ def _refresh_cluster_from_primary_source(
         ),
     )
     _maybe_upgrade_preferred_link(conn, job_id, job)
+    _maybe_upgrade_enrichment(conn, job_id, job)
 
 
 def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
@@ -960,6 +1039,7 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
         )
         conn.execute("UPDATE jobs SET last_seen_at = ? WHERE id = ?", (ts, job_id))
         _maybe_upgrade_preferred_link(conn, job_id, job)
+        _maybe_upgrade_enrichment(conn, job_id, job)
         return job_id, False
 
     # Legacy exact hash fallback keeps URL tracking variants stable even if a
@@ -993,12 +1073,12 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
         INSERT INTO jobs (
             source, source_job_id, title, company, location, url, canonical_url,
             preferred_url, preferred_source, salary, job_type, tags_json,
-            is_remote, original_source, content_hash, send_status,
-            published_at_raw, published_at_earliest, published_at_latest,
+            is_remote, original_source, description, eligibility, eligibility_evidence, eligibility_source,
+            content_hash, send_status, published_at_raw, published_at_earliest, published_at_latest,
             published_at_est, published_precision, time_semantics,
             freshness_status, freshness_reason, first_seen_at, last_seen_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 'UNKNOWN', '', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 'UNKNOWN', '', ?, ?)
         """,
         (
             job.source,
@@ -1015,6 +1095,10 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             tags_json,
             1 if job.is_remote else 0,
             job.original_source or "",
+            job.description or "",
+            job.eligibility or "NOT_SPECIFIED",
+            job.eligibility_evidence or "",
+            job.eligibility_source or "",
             content_hash,
             job.published_at_raw or "",
             job.published_at_earliest or "",
@@ -1671,6 +1755,10 @@ def _row_to_stored_job(row: sqlite3.Row) -> StoredJob:
         tags=tags,
         is_remote=bool(row["is_remote"]),
         original_source=row["original_source"] or "",
+        description=(row["description"] or "") if "description" in row.keys() else "",
+        eligibility=(row["eligibility"] or "NOT_SPECIFIED") if "eligibility" in row.keys() else "NOT_SPECIFIED",
+        eligibility_evidence=(row["eligibility_evidence"] or "") if "eligibility_evidence" in row.keys() else "",
+        eligibility_source=(row["eligibility_source"] or "") if "eligibility_source" in row.keys() else "",
         content_hash=row["content_hash"],
         send_status=row["send_status"],
         published_at_raw=row["published_at_raw"] or "",
