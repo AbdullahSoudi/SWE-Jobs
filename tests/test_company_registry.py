@@ -12,7 +12,10 @@ from company_registry import build_ats_fetchers, build_ats_poll_intervals, load_
 class CompanyRegistryTests(unittest.TestCase):
     def test_initial_registry_is_small_and_all_shadow_by_default(self):
         companies = load_ats_companies()
-        self.assertEqual([c.key for c in companies], ["hala", "minio", "soum", "sarjai", "echelon"])
+        self.assertEqual([c.key for c in companies], [
+            "hala", "minio", "soum", "sarjai", "echelon",
+            "scaleai", "canonical", "incorta", "uipath", "elevenlabs", "cognition", "leantech",
+        ])
         self.assertEqual({c.ats for c in companies}, {"greenhouse", "lever", "ashby"})
         self.assertTrue(all(c.country == "SA" for c in companies))
         self.assertTrue(all(c.source_key.startswith("ats_") for c in companies))
@@ -27,6 +30,13 @@ class CompanyRegistryTests(unittest.TestCase):
             "soum": 30,
             "sarjai": 60,
             "echelon": 60,
+            "scaleai": 30,
+            "canonical": 60,
+            "incorta": 60,
+            "uipath": 60,
+            "elevenlabs": 60,
+            "cognition": 60,
+            "leantech": 30,
         })
         source_intervals = build_ats_poll_intervals()
         self.assertEqual(source_intervals["ats_greenhouse_hala"], 30)
@@ -43,6 +53,13 @@ class CompanyRegistryTests(unittest.TestCase):
                 "ATS Lever soum",
                 "ATS Ashby sarjai",
                 "ATS Ashby echelon",
+                "ATS Greenhouse scaleai",
+                "ATS Greenhouse canonical",
+                "ATS Lever incorta",
+                "ATS Ashby uipath",
+                "ATS Ashby elevenlabs",
+                "ATS Ashby cognition",
+                "ATS Ashby leantech",
             ],
         )
         for _, fetcher in fetchers:

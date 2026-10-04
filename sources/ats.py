@@ -75,9 +75,10 @@ def fetch_greenhouse_company(
 ) -> list[Job]:
     """Fetch a Greenhouse public job board.
 
-    Greenhouse exposes ``updated_at`` rather than a publication timestamp on
-    the list endpoint. We retain it as raw audit metadata but intentionally do
-    not feed it into publication freshness; snapshot observation is safer.
+    Greenhouse currently exposes ``first_published`` on public list rows. When
+    present we use it as exact publication evidence. Older/variant payloads may
+    omit it; those rows deliberately fall back to snapshot observation instead
+    of treating ``updated_at`` as a publish time.
     """
     getter = http_getter or get_json
     url = GREENHOUSE_URL.format(tenant=tenant)
@@ -105,6 +106,15 @@ def fetch_greenhouse_company(
         if not title or not absolute_url or not source_job_id:
             continue
 
+        first_published = _clean(row.get("first_published"))
+        publication = _publication_fields(first_published) if first_published else {
+            "published_at_raw": _clean(row.get("updated_at")),
+            "published_at_earliest": "",
+            "published_at_latest": "",
+            "published_at_est": "",
+            "published_precision": "NONE",
+            "time_semantics": "UPDATED" if row.get("updated_at") else "UNKNOWN",
+        }
         jobs.append(Job(
             title=title,
             company=company,
@@ -113,9 +123,7 @@ def fetch_greenhouse_company(
             source=source_key,
             source_job_id=source_job_id,
             original_source=_source_label(company),
-            published_at_raw=_clean(row.get("updated_at")),
-            published_precision="NONE",
-            time_semantics="UPDATED",
+            **publication,
         ))
 
     log.info("ATS Greenhouse %s: fetched %s Saudi postings.", company, len(jobs))
@@ -144,7 +152,21 @@ def fetch_lever_company(
         if not isinstance(row, dict):
             continue
         categories = row.get("categories") if isinstance(row.get("categories"), dict) else {}
-        location = _saudi_location(_clean(categories.get("location")), _clean(row.get("country")))
+        location_details = categories.get("locationDetails") if isinstance(categories.get("locationDetails"), dict) else {}
+        country_hint = _clean(row.get("country")) or _clean(location_details.get("country"))
+        location_candidates = [_clean(categories.get("location"))]
+        if isinstance(categories.get("allLocations"), list):
+            location_candidates.extend(_clean(value) for value in categories.get("allLocations") if value)
+        # Prefer explicit Saudi evidence in any listed location. Only use a
+        # structured country hint for the primary location if the text itself
+        # is ambiguous; applying one country code to every multi-location label
+        # can misclassify a non-Saudi secondary office.
+        location = next(
+            (matched for candidate in location_candidates if (matched := _saudi_location(candidate))),
+            None,
+        )
+        if not location and location_candidates:
+            location = _saudi_location(location_candidates[0], country_hint)
         if not location:
             continue
         title = _clean(row.get("text"))
@@ -204,6 +226,15 @@ def fetch_ashby_company(
         postal = address.get("postalAddress") if isinstance(address.get("postalAddress"), dict) else {}
         country = _clean(postal.get("addressCountry"))
         location = _saudi_location(_clean(row.get("location")), country)
+        if not location and isinstance(row.get("secondaryLocations"), list):
+            for secondary in row.get("secondaryLocations"):
+                if not isinstance(secondary, dict):
+                    continue
+                secondary_address = secondary.get("address") if isinstance(secondary.get("address"), dict) else {}
+                secondary_country = _clean(secondary_address.get("addressCountry"))
+                location = _saudi_location(_clean(secondary.get("location")), secondary_country)
+                if location:
+                    break
         if not location:
             continue
 

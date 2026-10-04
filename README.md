@@ -8,7 +8,7 @@ The product goal is a real-time job feed, not a historical job archive:
 
 ## Current Design
 
-- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2 and a small shadow ATS company registry (Greenhouse, Lever, Ashby).
+- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2 and an evidence-driven shadow ATS company registry (Greenhouse, Lever, Ashby).
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
@@ -35,26 +35,44 @@ Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core f
 | SOUM | Shadow ATS | Lever public postings API · 30 min poll |
 | Sarj.ai | Shadow ATS | Ashby public job posting API · 60 min poll |
 | Echelon | Shadow ATS | Ashby public job posting API · 60 min poll |
+| Scale AI | Shadow ATS | Greenhouse; active Saudi engineering hiring · 30 min poll |
+| Canonical | Shadow ATS | Greenhouse; Saudi/Middle East tech roles · 60 min poll |
+| Incorta | Shadow ATS | Lever; Riyadh data/BI roles · 60 min poll |
+| UiPath | Shadow ATS | Ashby; Riyadh automation/solution engineering · 60 min poll |
+| ElevenLabs | Shadow ATS | Ashby; Saudi AI/engineering/GTM roles · 60 min poll |
+| Cognition | Shadow ATS | Ashby; Riyadh/MENA applied-AI roles · 60 min poll |
+| Lean Technologies | Shadow ATS | Ashby; Riyadh fintech/platform roles · 30 min poll |
 | Legacy aggregators | Disabled | Not registered at runtime |
 
 All ATS feeds are shadow by default because their generated source keys are not in `PRODUCTION_SOURCE_KEYS`. Their first successful fetch establishes a no-send baseline, then later newly observed jobs can be measured without Telegram delivery.
 
 ### Saudi ATS company registry
 
-The first registry is deliberately small:
+The registry grows in measured batches rather than hundreds of employers at once. The current shadow set is:
 
 ```text
 companies/saudi_ats.json
-├── HALA       → Greenhouse
-├── MinIO      → Greenhouse
-├── SOUM       → Lever
-├── Sarj.ai    → Ashby
-└── Echelon    → Ashby
+├── HALA             → Greenhouse
+├── MinIO            → Greenhouse
+├── SOUM             → Lever
+├── Sarj.ai          → Ashby
+├── Echelon          → Ashby
+├── Scale AI         → Greenhouse
+├── Canonical        → Greenhouse
+├── Incorta          → Lever
+├── UiPath           → Ashby
+├── ElevenLabs       → Ashby
+├── Cognition        → Ashby
+└── Lean Technologies→ Ashby
 ```
 
 `company_registry.py` validates the registry and builds one source fetcher per employer. This gives each company its own source health/freshness/observation metrics instead of hiding all ATS traffic behind one aggregate source.
 
-The adapters live in `sources/ats.py` and use public job-board read endpoints only. Greenhouse and Lever are treated as snapshot feeds when they do not expose a reliable publication time. Ashby preserves its `publishedAt` timestamp. Global company boards are filtered to explicit Saudi locations before the tech classifier runs, so a global remote role is not accepted merely because the employer is in the Saudi registry.
+The adapters live in `sources/ats.py` and use public job-board read endpoints only. Greenhouse now preserves `first_published` when the public feed provides it, falling back to snapshot observation when it does not. Lever remains snapshot-based because its public v0 posting timestamp is not reliable enough for our freshness gate. Ashby preserves `publishedAt`. Lever `allLocations` and Ashby secondary locations are inspected so a Saudi location is not lost when it is not the primary display location. Global company boards are still filtered to explicit Saudi locations before the tech classifier runs.
+
+### ATS discovery helper
+
+`ats_detector.py` recognizes Greenhouse, Lever, and Ashby job/apply URLs and extracts the tenant/board identifier without making a network request. This is the foundation for bootstrapping future registry candidates from off-site apply URLs observed in LinkedIn or other trusted feeds. Unknown/custom career sites return no guess and remain manual-review candidates.
 
 ### Source scheduling and health
 
@@ -413,6 +431,7 @@ python main.py
 ├── source_analytics.py
 ├── source_runtime.py
 ├── company_registry.py
+├── ats_detector.py
 ├── telegram_sender.py
 ├── cleanup.py
 ├── requirements.txt
@@ -428,6 +447,7 @@ python main.py
 │   └── linkedin_saudi_v2.py
 ├── tests/
 │   ├── test_ats.py
+│   ├── test_ats_detector.py
 │   ├── test_company_registry.py
 │   ├── test_db.py
 │   ├── test_freshness.py

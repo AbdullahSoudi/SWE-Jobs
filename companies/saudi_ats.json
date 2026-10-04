@@ -48,5 +48,75 @@
     "careers_url": "https://jobs.ashbyhq.com/echeloncareers",
     "enabled": true,
     "poll_interval_minutes": 60
+  },
+  {
+    "key": "scaleai",
+    "company": "Scale AI",
+    "ats": "greenhouse",
+    "tenant": "scaleai",
+    "country": "SA",
+    "careers_url": "https://job-boards.greenhouse.io/scaleai",
+    "enabled": true,
+    "poll_interval_minutes": 30
+  },
+  {
+    "key": "canonical",
+    "company": "Canonical",
+    "ats": "greenhouse",
+    "tenant": "canonicaljobs",
+    "country": "SA",
+    "careers_url": "https://job-boards.greenhouse.io/canonicaljobs",
+    "enabled": true,
+    "poll_interval_minutes": 60
+  },
+  {
+    "key": "incorta",
+    "company": "Incorta",
+    "ats": "lever",
+    "tenant": "incorta",
+    "country": "SA",
+    "careers_url": "https://jobs.lever.co/incorta",
+    "enabled": true,
+    "poll_interval_minutes": 60
+  },
+  {
+    "key": "uipath",
+    "company": "UiPath",
+    "ats": "ashby",
+    "tenant": "uipath",
+    "country": "SA",
+    "careers_url": "https://jobs.ashbyhq.com/uipath",
+    "enabled": true,
+    "poll_interval_minutes": 60
+  },
+  {
+    "key": "elevenlabs",
+    "company": "ElevenLabs",
+    "ats": "ashby",
+    "tenant": "elevenlabs",
+    "country": "SA",
+    "careers_url": "https://jobs.ashbyhq.com/elevenlabs",
+    "enabled": true,
+    "poll_interval_minutes": 60
+  },
+  {
+    "key": "cognition",
+    "company": "Cognition",
+    "ats": "ashby",
+    "tenant": "cognition",
+    "country": "SA",
+    "careers_url": "https://jobs.ashbyhq.com/cognition",
+    "enabled": true,
+    "poll_interval_minutes": 60
+  },
+  {
+    "key": "leantech",
+    "company": "Lean Technologies",
+    "ats": "ashby",
+    "tenant": "LeanTech",
+    "country": "SA",
+    "careers_url": "https://jobs.ashbyhq.com/LeanTech",
+    "enabled": true,
+    "poll_interval_minutes": 30
   }
 ]

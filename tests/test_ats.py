@@ -8,7 +8,7 @@ from sources.ats import fetch_ashby_company, fetch_greenhouse_company, fetch_lev
 
 
 class ATSAdapterTests(unittest.TestCase):
-    def test_greenhouse_keeps_only_explicit_saudi_rows_and_does_not_treat_updated_as_published(self):
+    def test_greenhouse_uses_first_published_when_available(self):
         payload = {
             "jobs": [
                 {
@@ -16,38 +16,53 @@ class ATSAdapterTests(unittest.TestCase):
                     "title": "Backend Engineer",
                     "location": {"name": "Riyadh, Saudi Arabia"},
                     "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/101",
-                    "updated_at": "2026-10-04T18:00:00Z",
+                    "first_published": "2026-10-04T18:00:00Z",
+                    "updated_at": "2026-10-04T19:00:00Z",
                 },
                 {
                     "id": 102,
                     "title": "Backend Engineer",
                     "location": {"name": "London, United Kingdom"},
                     "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/102",
-                    "updated_at": "2026-10-04T18:00:00Z",
+                    "first_published": "2026-10-04T18:00:00Z",
                 },
             ]
         }
-        calls = []
-
-        def getter(url, params=None):
-            calls.append((url, params))
-            return payload
 
         jobs = fetch_greenhouse_company(
             tenant="acme",
             company="Acme",
             source_key="ats_greenhouse_acme",
-            http_getter=getter,
+            http_getter=lambda url, params=None: payload,
         )
         self.assertEqual(len(jobs), 1)
         job = jobs[0]
         self.assertEqual(job.source_job_id, "101")
         self.assertEqual(job.original_source, "Acme Careers")
+        self.assertEqual(job.time_semantics, "POSTED")
+        self.assertEqual(job.published_precision, "EXACT")
+        self.assertEqual(job.published_at_est, "2026-10-04T18:00:00Z")
+
+    def test_greenhouse_falls_back_to_snapshot_when_first_published_is_missing(self):
+        payload = {
+            "jobs": [{
+                "id": 103,
+                "title": "Platform Engineer",
+                "location": {"name": "Riyadh, Saudi Arabia"},
+                "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/103",
+                "updated_at": "2026-10-04T19:00:00Z",
+            }]
+        }
+        job = fetch_greenhouse_company(
+            tenant="acme",
+            company="Acme",
+            source_key="ats_greenhouse_acme",
+            http_getter=lambda url, params=None: payload,
+        )[0]
         self.assertEqual(job.time_semantics, "UPDATED")
         self.assertEqual(job.published_precision, "NONE")
         self.assertEqual(job.published_at_earliest, "")
-        self.assertIn("Riyadh", job.location)
-        self.assertEqual(calls[0][1], None)
+        self.assertEqual(job.published_at_raw, "2026-10-04T19:00:00Z")
 
     def test_lever_uses_country_code_and_normalizes_workplace_metadata(self):
         payload = [
@@ -55,12 +70,13 @@ class ATSAdapterTests(unittest.TestCase):
                 "id": "lever-1",
                 "text": "Information Security Officer",
                 "categories": {
-                    "location": "Riyadh",
+                    "location": "Dubai",
+                    "allLocations": ["Dubai", "Riyadh"],
+                    "locationDetails": {"country": "SA"},
                     "commitment": "Full-Time",
                     "team": "Technology",
                     "department": "Engineering",
                 },
-                "country": "SA",
                 "hostedUrl": "https://jobs.lever.co/acme/lever-1",
                 "workplaceType": "on-site",
             },
@@ -98,7 +114,10 @@ class ATSAdapterTests(unittest.TestCase):
             "jobs": [
                 {
                     "title": "Full Stack Software Engineer",
-                    "location": "Riyadh, Saudi Arabia",
+                    "location": "Dubai, UAE",
+                    "secondaryLocations": [
+                        {"location": "Riyadh, Saudi Arabia", "address": {"addressCountry": "Saudi Arabia"}}
+                    ],
                     "department": "Engineering",
                     "team": "Platform",
                     "isListed": True,
@@ -106,7 +125,7 @@ class ATSAdapterTests(unittest.TestCase):
                     "workplaceType": "Remote",
                     "publishedAt": "2026-10-04T18:21:55+00:00",
                     "employmentType": "FullTime",
-                    "address": {"postalAddress": {"addressCountry": "Saudi Arabia"}},
+                    "address": {"postalAddress": {"addressCountry": "UAE"}},
                     "jobUrl": "https://jobs.ashbyhq.com/acme/abc-123",
                     "applyUrl": "https://jobs.ashbyhq.com/acme/abc-123/application",
                 },

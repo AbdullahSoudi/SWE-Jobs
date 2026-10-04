@@ -30,6 +30,13 @@ class SourceRegistryTests(unittest.TestCase):
                 "ATS Lever soum",
                 "ATS Ashby sarjai",
                 "ATS Ashby echelon",
+                "ATS Greenhouse scaleai",
+                "ATS Greenhouse canonical",
+                "ATS Lever incorta",
+                "ATS Ashby uipath",
+                "ATS Ashby elevenlabs",
+                "ATS Ashby cognition",
+                "ATS Ashby leantech",
             ],
         )
 
@@ -76,7 +83,7 @@ class SourceRegistryTests(unittest.TestCase):
     def test_registry_contains_only_expected_core_fetcher_names(self):
         core_names = {fetcher.__name__ for _, fetcher in self.registry.CORE_FETCHERS}
         self.assertEqual(core_names, {"fetch_wuzzuf", "fetch_linkedin", "fetch_linkedin_saudi_v2"})
-        self.assertEqual(len(self.registry.ATS_FETCHERS), 5)
+        self.assertEqual(len(self.registry.ATS_FETCHERS), 12)
 
 
 if __name__ == "__main__":
