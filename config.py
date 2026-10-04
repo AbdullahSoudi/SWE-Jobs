@@ -8,7 +8,9 @@ import os
 # ─── Telegram ───────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_GROUP_ID = os.getenv("TELEGRAM_GROUP_ID", "")  # The supergroup chat ID
-TELEGRAM_SEND_DELAY = 3  # seconds between messages
+TELEGRAM_SEND_DELAY = float(os.getenv("TELEGRAM_SEND_DELAY", "3"))  # per-supergroup minimum interval
+TELEGRAM_REQUEST_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_REQUEST_TIMEOUT_SECONDS", "10"))
+TELEGRAM_MAX_INLINE_RETRIES = int(os.getenv("TELEGRAM_MAX_INLINE_RETRIES", "2"))
 
 # ─── Community Topics ───────────────────────────────────────
 # Each topic has: thread_id (from the topic link) + keywords for routing

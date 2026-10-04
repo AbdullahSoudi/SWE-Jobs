@@ -12,13 +12,16 @@ This version intentionally replaced the old 15-source aggregator with a narrower
 - **LinkedIn**: limited public guest search cards for very fresh jobs.
 - **SQLite tracking**: jobs are stored in `jobs.db` before Telegram sending.
 - **Per-topic send tracking**: a job is marked fully sent only after all intended topics succeed.
-- **Retry-safe**: partial Telegram failures are retried only for the failed topics.
+- **Durable Telegram outbox**: each topic delivery is queued in SQLite before the network call and tracked separately.
 - **Legacy backlog safety**: old pending/retry rows are expired once instead of being replayed as fresh jobs.
 - **Fresh-only send gate**: only newly discovered jobs that are still fresh enough are eligible for Telegram.
 - **Automatic source baseline**: the first successful fetch for a new source is stored without sending, preventing bootstrap floods.
 - **Freshness evidence**: publication-time signals are stored with their precision instead of being forced into a fake exact timestamp.
 - **Coverage-gap safety**: uncertain jobs are not treated as fresh after a source has been unavailable for too long.
 - **Source state**: successful fetch time, baseline state, and consecutive failures are persisted per source.
+- **Telegram backpressure**: sends are rate-limited per supergroup, `429 retry_after` pauses the whole queue, and transient 5xx/network failures use bounded retries.
+- **Ambiguous-send safety**: a read timeout or process crash after claiming a delivery becomes `UNKNOWN` instead of being blindly retried and potentially duplicated.
+- **Delivery audit trail**: every Telegram attempt stores outcome, HTTP/error codes, retry delay, and message ID when available.
 - **GitHub Actions only**: no VPS or external database required.
 - **15-minute schedule**: cron runs every 15 minutes.
 
@@ -80,7 +83,7 @@ Current topic secrets:
 | `TOPIC_DESIGN` | UI/UX / graphic / product design jobs |
 | `TOPIC_BUSINESS` | Business analyst / product / project roles |
 
-Topics without configured thread IDs are skipped and recorded as failed, so they can be retried after adding the missing secret.
+Topics without configured thread IDs are recorded as `CONFIG_ERROR`. That topic is disabled for the rest of the current run so a bad secret cannot create a retry storm or late replay.
 
 ## Required GitHub Secrets
 
@@ -185,7 +188,9 @@ The database tracks:
 - first seen time
 - last seen time
 - job send status
-- per-topic send status
+- per-topic delivery status, attempt count, next retry time, and hard deadline
+- Telegram error class, HTTP status, Bot API error code, `retry_after`, and returned message ID
+- append-only `delivery_attempts` audit history
 - source run status
 - last successful source fetch
 - source baseline state
@@ -198,8 +203,11 @@ Send statuses include:
 |---|---|
 | `pending` | Stored and waiting to send |
 | `sent` | Successfully sent to all intended topics |
-| `partial` | Sent to at least one topic, failed in at least one other topic |
-| `retry` | Send failed and should be retried |
+| `partial` | Some topics are sent while at least one retryable delivery remains |
+| `retry` | No topic is sent yet and at least one retryable delivery remains |
+| `partial_failed` | At least one topic sent, but the remaining delivery is terminal |
+| `failed` | All attempted deliveries are terminal failures |
+| `unknown` | Telegram may have accepted a request, so the bot will not blindly retry it |
 | `skipped` | No matching topics, or seed mode intentionally skipped sending |
 | `expired` | Job is too old, too uncertain, or has exceeded the live-send deadline |
 
@@ -227,16 +235,25 @@ read pending/retry/partial jobs (freshest first)
   ↓
 route to Telegram topics
   ↓
-send only unsent topics
+create/refresh durable topic deliveries in SQLite
   ↓
-record topic-level result
+claim one delivery and commit before network call
+  ↓
+rate-limited Telegram send
+  ├─ 200 → sent
+  ├─ 429 → persist retry_after + pause whole group queue
+  ├─ 5xx/network → bounded retry, then retry_wait
+  ├─ config/400 → terminal delivery error
+  └─ ambiguous read timeout/crash → unknown / no blind retry
+  ↓
+append delivery_attempts audit row
   ↓
 commit jobs.db to data branch
 ```
 
 ## Active Freshness Gate
 
-Schema v3 separates **what the source tells us** from **whether a newly discovered job is safe to notify**. `12 minutes ago` is stored as a narrow interval, while `1 hour ago` remains a wider hour bucket. Exact `datetime` values stay exact; missing/coarse values stay uncertain.
+Schema v4 keeps the freshness model from v3 and adds the durable Telegram delivery state/audit tables. The freshness model separates **what the source tells us** from **whether a newly discovered job is safe to notify**. `12 minutes ago` is stored as a narrow interval, while `1 hour ago` remains a wider hour bucket. Exact `datetime` values stay exact; missing/coarse values stay uncertain.
 
 The send decision is now based on **new-to-us + max age + source baseline**, not `published_at > last_run`. This avoids losing jobs that become visible after indexing delay.
 
@@ -269,6 +286,9 @@ Freshness/runtime environment overrides:
 LINKEDIN_FRESHNESS_SECONDS=3600
 WUZZUF_OBSERVATION_MAX_AGE_MINUTES=60
 PENDING_SEND_MAX_AGE_MINUTES=60
+TELEGRAM_SEND_DELAY=3
+TELEGRAM_REQUEST_TIMEOUT_SECONDS=10
+TELEGRAM_MAX_INLINE_RETRIES=2
 ```
 
 These are safety budgets, not promises that a source publishes/indexes every job instantly.
@@ -338,6 +358,7 @@ python main.py
 │   ├── test_main_sqlite.py
 │   ├── test_routing.py
 │   ├── test_sources_registry.py
+│   ├── test_telegram_sender.py
 │   ├── test_workflow.py
 │   └── test_wuzzuf.py
 └── .github/workflows/

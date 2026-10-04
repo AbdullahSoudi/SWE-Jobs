@@ -88,7 +88,9 @@ class TelegramRoutingTests(unittest.TestCase):
             is_remote=True,
         )
         result = telegram_sender.send_job(job, target_topics=["missing_topic_for_test"])
-        self.assertEqual(result, {"missing_topic_for_test": False})
+        delivery = result["missing_topic_for_test"]
+        self.assertFalse(delivery.success)
+        self.assertEqual(delivery.outcome, telegram_sender.CONFIG_ERROR)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from models import Job
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -169,6 +169,14 @@ def init_db(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             sent_at TEXT,
             error TEXT DEFAULT '',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT,
+            deadline_at TEXT,
+            last_error_class TEXT DEFAULT '',
+            http_status INTEGER,
+            tg_error_code INTEGER,
+            retry_after_s INTEGER,
+            telegram_message_id INTEGER,
             updated_at TEXT NOT NULL,
             UNIQUE(job_id, topic_key),
             FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
@@ -176,6 +184,25 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_job_sends_status
             ON job_sends(status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS delivery_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            topic_key TEXT NOT NULL,
+            attempt_no INTEGER NOT NULL,
+            attempted_at TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            http_status INTEGER,
+            tg_error_code INTEGER,
+            error TEXT DEFAULT '',
+            retry_after_s INTEGER,
+            telegram_message_id INTEGER,
+            fallback_used INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_delivery_attempts_job_topic
+            ON delivery_attempts(job_id, topic_key, attempted_at);
 
         CREATE TABLE IF NOT EXISTS source_runs (
             source TEXT PRIMARY KEY,
@@ -230,6 +257,40 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         "consecutive_failures INTEGER NOT NULL DEFAULT 0",
     ):
         _ensure_column(conn, "source_runs", definition)
+    for definition in (
+        "attempt_count INTEGER NOT NULL DEFAULT 0",
+        "next_attempt_at TEXT",
+        "deadline_at TEXT",
+        "last_error_class TEXT DEFAULT ''",
+        "http_status INTEGER",
+        "tg_error_code INTEGER",
+        "retry_after_s INTEGER",
+        "telegram_message_id INTEGER",
+    ):
+        _ensure_column(conn, "job_sends", definition)
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS delivery_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            topic_key TEXT NOT NULL,
+            attempt_no INTEGER NOT NULL,
+            attempted_at TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            http_status INTEGER,
+            tg_error_code INTEGER,
+            error TEXT DEFAULT '',
+            retry_after_s INTEGER,
+            telegram_message_id INTEGER,
+            fallback_used INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_delivery_attempts_job_topic
+            ON delivery_attempts(job_id, topic_key, attempted_at);
+        """
+    )
+
 
     # Only schema-v1 databases have legacy successful sources that predate
     # explicit baselining. Do not auto-baseline sources created after v2.
@@ -255,6 +316,21 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
                     WHEN freshness_reason = '' THEN 'pre_v3_record'
                     ELSE freshness_reason
                 END
+            """
+        )
+
+    if previous_version < 4:
+        # v3 recorded failed topic attempts as a generic 'failed'. Preserve
+        # their retryability under the richer delivery state machine.
+        conn.execute(
+            """
+            UPDATE job_sends
+            SET status = 'retry_wait',
+                last_error_class = CASE
+                    WHEN last_error_class = '' THEN 'RETRYABLE'
+                    ELSE last_error_class
+                END
+            WHERE status = 'failed'
             """
         )
 
@@ -511,6 +587,205 @@ def get_jobs_for_sending(conn: sqlite3.Connection, limit: int = 100) -> list[Sto
     return [_row_to_stored_job(row) for row in rows]
 
 
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def ensure_topic_deliveries(
+    conn: sqlite3.Connection,
+    job_id: int,
+    topic_keys: list[str],
+    deadline_at: str,
+) -> None:
+    """Create durable queued delivery rows before Telegram is called."""
+    ts = now_utc()
+    for topic_key in topic_keys:
+        conn.execute(
+            """
+            INSERT INTO job_sends(
+                job_id, topic_key, status, sent_at, error, attempt_count,
+                next_attempt_at, deadline_at, last_error_class, updated_at
+            )
+            VALUES (?, ?, 'queued', NULL, '', 0, NULL, ?, '', ?)
+            ON CONFLICT(job_id, topic_key) DO UPDATE SET
+                deadline_at = COALESCE(job_sends.deadline_at, excluded.deadline_at)
+            """,
+            (job_id, topic_key, deadline_at, ts),
+        )
+
+
+def get_topic_delivery_states(conn: sqlite3.Connection, job_id: int) -> dict[str, dict]:
+    rows = conn.execute(
+        "SELECT * FROM job_sends WHERE job_id = ?",
+        (job_id,),
+    ).fetchall()
+    return {str(row["topic_key"]): dict(row) for row in rows}
+
+
+def mark_topic_sending(
+    conn: sqlite3.Connection,
+    job_id: int,
+    topic_key: str,
+    reference_time: datetime | None = None,
+) -> None:
+    """Claim one delivery before the network call. A crash leaves it ambiguous."""
+    now = reference_time or datetime.now(UTC)
+    conn.execute(
+        """
+        UPDATE job_sends
+        SET status = 'sending', next_attempt_at = NULL, updated_at = ?
+        WHERE job_id = ? AND topic_key = ?
+        """,
+        (_utc_iso(now), job_id, topic_key),
+    )
+
+
+def recover_stale_sending_deliveries(
+    conn: sqlite3.Connection,
+    stale_after_minutes: int = 10,
+    reference_time: datetime | None = None,
+) -> int:
+    """Turn crash-left 'sending' rows into UNKNOWN instead of blind retries."""
+    now = reference_time or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    else:
+        now = now.astimezone(UTC)
+    cutoff = _utc_iso(now - timedelta(minutes=stale_after_minutes))
+    cur = conn.execute(
+        """
+        UPDATE job_sends
+        SET status = 'unknown',
+            last_error_class = 'UNKNOWN',
+            error = CASE WHEN error = '' THEN 'ambiguous_previous_attempt' ELSE error END,
+            next_attempt_at = NULL,
+            updated_at = ?
+        WHERE status = 'sending' AND updated_at < ?
+        """,
+        (_utc_iso(now), cutoff),
+    )
+    return int(cur.rowcount)
+
+
+def record_delivery_result(
+    conn: sqlite3.Connection,
+    job_id: int,
+    topic_key: str,
+    *,
+    outcome: str,
+    error: str = "",
+    http_status: int | None = None,
+    tg_error_code: int | None = None,
+    retry_after_s: int | None = None,
+    telegram_message_id: int | None = None,
+    fallback_used: bool = False,
+    reference_time: datetime | None = None,
+) -> None:
+    """Persist one attempted Telegram delivery and its retry semantics."""
+    now = reference_time or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    else:
+        now = now.astimezone(UTC)
+    attempted_at = _utc_iso(now)
+
+    current = conn.execute(
+        "SELECT attempt_count, deadline_at FROM job_sends WHERE job_id = ? AND topic_key = ?",
+        (job_id, topic_key),
+    ).fetchone()
+    attempt_no = int(current["attempt_count"] if current else 0) + 1
+
+    normalized = (outcome or "RETRYABLE").upper()
+    if normalized == "SENT":
+        status = "sent"
+        sent_at = attempted_at
+        next_attempt_at = None
+    elif normalized == "RATE_LIMITED":
+        status = "retry_wait"
+        sent_at = None
+        wait_seconds = max(1, int(retry_after_s or 60))
+        next_attempt_at = _utc_iso(now + timedelta(seconds=wait_seconds))
+    elif normalized == "RETRYABLE":
+        status = "retry_wait"
+        sent_at = None
+        next_attempt_at = _utc_iso(now + timedelta(seconds=60))
+    elif normalized == "UNKNOWN":
+        status = "unknown"
+        sent_at = None
+        next_attempt_at = None
+    elif normalized == "CONFIG_ERROR":
+        status = "config_error"
+        sent_at = None
+        next_attempt_at = None
+    else:
+        status = "failed_permanent"
+        sent_at = None
+        next_attempt_at = None
+
+    ts = now_utc()
+    conn.execute(
+        """
+        INSERT INTO job_sends(
+            job_id, topic_key, status, sent_at, error, attempt_count,
+            next_attempt_at, deadline_at, last_error_class, http_status,
+            tg_error_code, retry_after_s, telegram_message_id, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, topic_key) DO UPDATE SET
+            status = excluded.status,
+            sent_at = COALESCE(excluded.sent_at, job_sends.sent_at),
+            error = excluded.error,
+            attempt_count = excluded.attempt_count,
+            next_attempt_at = excluded.next_attempt_at,
+            last_error_class = excluded.last_error_class,
+            http_status = excluded.http_status,
+            tg_error_code = excluded.tg_error_code,
+            retry_after_s = excluded.retry_after_s,
+            telegram_message_id = COALESCE(excluded.telegram_message_id, job_sends.telegram_message_id),
+            updated_at = excluded.updated_at
+        """,
+        (
+            job_id,
+            topic_key,
+            status,
+            sent_at,
+            error or "",
+            attempt_no,
+            next_attempt_at,
+            normalized,
+            http_status,
+            tg_error_code,
+            retry_after_s,
+            telegram_message_id,
+            ts,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO delivery_attempts(
+            job_id, topic_key, attempt_no, attempted_at, outcome,
+            http_status, tg_error_code, error, retry_after_s,
+            telegram_message_id, fallback_used
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            topic_key,
+            attempt_no,
+            attempted_at,
+            normalized,
+            http_status,
+            tg_error_code,
+            error or "",
+            retry_after_s,
+            telegram_message_id,
+            1 if fallback_used else 0,
+        ),
+    )
+
+
 def record_topic_send(
     conn: sqlite3.Connection,
     job_id: int,
@@ -518,24 +793,15 @@ def record_topic_send(
     success: bool,
     error: str = "",
 ) -> None:
-    """Record the Telegram send result for one job/topic pair."""
-    ts = now_utc()
-    status = "sent" if success else "failed"
-    sent_at = ts if success else None
-    conn.execute(
-        """
-        INSERT INTO job_sends(job_id, topic_key, status, sent_at, error, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(job_id, topic_key) DO UPDATE SET
-            status = excluded.status,
-            sent_at = excluded.sent_at,
-            error = excluded.error,
-            updated_at = excluded.updated_at
-        """,
-        (job_id, topic_key, status, sent_at, error or "", ts),
+    """Backward-compatible wrapper used by older tests/helpers."""
+    ensure_topic_deliveries(conn, job_id, [topic_key], deadline_at="")
+    record_delivery_result(
+        conn,
+        job_id,
+        topic_key,
+        outcome="SENT" if success else "RETRYABLE",
+        error=error,
     )
-
-
 
 
 def get_sent_topic_keys(conn: sqlite3.Connection, job_id: int) -> set[str]:
@@ -546,9 +812,10 @@ def get_sent_topic_keys(conn: sqlite3.Connection, job_id: int) -> set[str]:
     ).fetchall()
     return {str(row["topic_key"]) for row in rows}
 
+
 def set_job_send_status(conn: sqlite3.Connection, job_id: int, status: str) -> None:
     """Set the aggregate send status for a job."""
-    allowed = {"pending", "sent", "retry", "partial", "skipped", "expired"}
+    allowed = {"pending", "sent", "retry", "partial", "skipped", "expired", "failed", "unknown", "partial_failed"}
     if status not in allowed:
         raise ValueError(f"Invalid send status: {status}")
     conn.execute("UPDATE jobs SET send_status = ? WHERE id = ?", (status, job_id))
@@ -599,7 +866,22 @@ def expire_stale_unsent_jobs(
         """,
         (cutoff_iso,),
     )
-    return int(cur.rowcount)
+    expired_count = int(cur.rowcount)
+    if expired_count:
+        conn.execute(
+            """
+            UPDATE job_sends
+            SET status = 'expired', next_attempt_at = NULL, updated_at = ?
+            WHERE status IN ('queued', 'retry_wait', 'sending')
+              AND job_id IN (
+                  SELECT id FROM jobs
+                  WHERE send_status = 'expired'
+                    AND freshness_reason = 'send_queue_deadline_exceeded'
+              )
+            """,
+            (now_utc(),),
+        )
+    return expired_count
 
 
 def update_source_run(

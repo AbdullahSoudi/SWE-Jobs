@@ -16,7 +16,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Callable, Iterable
 
 from config import (
@@ -32,11 +32,18 @@ try:
 except ModuleNotFoundError:  # local flat-file test layout
     from __init__ import ALL_FETCHERS
 from models import Job, is_programming_job, passes_geo_filter
-from telegram_sender import send_job, route_job
+from telegram_sender import (
+    CONFIG_ERROR,
+    RATE_LIMITED,
+    RETRYABLE,
+    SENT,
+    TelegramSendResult,
+    send_job,
+    route_job,
+)
 from cleanup import cleanup_join_messages
 from freshness import (
     BASELINE,
-    FRESH,
     UNCERTAIN,
     PublicationEvidence,
     ensure_utc,
@@ -51,13 +58,18 @@ from db import (
     expire_legacy_backlog_once,
     expire_stale_unsent_jobs,
     get_jobs_for_sending,
-    get_sent_topic_keys,
+    get_metadata,
+    ensure_topic_deliveries,
     get_source_last_success,
+    get_topic_delivery_states,
     is_source_baselined,
     mark_source_baselined,
-    record_topic_send,
+    mark_topic_sending,
+    record_delivery_result,
+    recover_stale_sending_deliveries,
     set_job_freshness_state,
     set_job_send_status,
+    set_metadata,
     update_source_run,
     upsert_job,
     upsert_jobs,
@@ -71,9 +83,10 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 Fetcher = tuple[str, Callable[[], list[Job]]]
-Sender = Callable[[Job, list[str] | None], dict[str, bool]]
+Sender = Callable[[Job, list[str] | None], dict[str, object]]
 Router = Callable[[Job], list[str]]
 Cleanup = Callable[[], None]
+TELEGRAM_BLOCKED_UNTIL_KEY = "telegram_group_blocked_until"
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,7 @@ class RunSummary:
     skipped_jobs: int = 0
     expired_backlog_jobs: int = 0
     expired_queue_jobs: int = 0
+    ambiguous_deliveries_recovered: int = 0
     total_jobs_in_db: int = 0
     seed_mode: bool = False
 
@@ -264,15 +278,58 @@ def persist_filtered_jobs(
     )
 
 
-def _aggregate_send_status(target_topics: list[str], sent_topics: set[str]) -> str:
-    """Map per-topic state to one job-level send_status."""
+def _parse_iso(value: str) -> datetime:
+    text = (value or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    return ensure_utc(datetime.fromisoformat(text))
+
+
+def _delivery_deadline(first_seen_at: str) -> str:
+    deadline = _parse_iso(first_seen_at) + timedelta(minutes=PENDING_SEND_MAX_AGE_MINUTES)
+    return iso_utc(deadline)
+
+
+def _coerce_send_result(value: object) -> TelegramSendResult:
+    """Keep test/custom senders backward compatible with bool results."""
+    if isinstance(value, TelegramSendResult):
+        return value
+    if bool(value):
+        return TelegramSendResult(True, SENT)
+    return TelegramSendResult(False, RETRYABLE, "sender returned false")
+
+
+def _topic_ready(state: dict | None, reference_time: datetime) -> bool:
+    if not state:
+        return True
+    status = str(state.get("status") or "queued")
+    if status == "queued":
+        return True
+    if status != "retry_wait":
+        return False
+    next_attempt = state.get("next_attempt_at")
+    if not next_attempt:
+        return True
+    return _parse_iso(str(next_attempt)) <= reference_time
+
+
+def _aggregate_delivery_status(target_topics: list[str], states: dict[str, dict]) -> str:
+    """Derive the job-level status from durable per-topic delivery rows."""
     if not target_topics:
         return "skipped"
-    if all(topic in sent_topics for topic in target_topics):
+    statuses = [str((states.get(topic) or {}).get("status") or "queued") for topic in target_topics]
+    if all(status == "sent" for status in statuses):
         return "sent"
-    if sent_topics:
-        return "partial"
-    return "retry"
+
+    has_sent = any(status == "sent" for status in statuses)
+    has_retryable = any(status in {"queued", "retry_wait", "sending"} for status in statuses)
+    if has_retryable:
+        return "partial" if has_sent else "retry"
+
+    if any(status == "unknown" for status in statuses):
+        return "partial_failed" if has_sent else "unknown"
+
+    return "partial_failed" if has_sent else "failed"
 
 
 def send_pending_jobs(
@@ -280,13 +337,30 @@ def send_pending_jobs(
     limit: int = MAX_JOBS_PER_RUN,
     sender: Sender = send_job,
     router: Router = route_job,
+    *,
+    reference_time: datetime | None = None,
 ) -> tuple[int, int, int, int]:
-    """Send pending/retry/partial jobs and persist per-topic results."""
+    """Deliver queued jobs with durable per-topic state and Telegram backpressure."""
     pending_jobs = get_jobs_for_sending(conn, limit=limit)
     processed = 0
     successes = 0
     failures = 0
     skipped = 0
+    now = ensure_utc(reference_time or utc_now())
+    blocked_until = get_metadata(conn, TELEGRAM_BLOCKED_UNTIL_KEY)
+    if blocked_until:
+        try:
+            blocked_dt = _parse_iso(blocked_until)
+        except ValueError:
+            blocked_dt = now
+        if blocked_dt > now:
+            log.warning("Telegram group queue is paused until %s after a prior 429.", blocked_until)
+            return 0, 0, 0, 0
+        set_metadata(conn, TELEGRAM_BLOCKED_UNTIL_KEY, "")
+        conn.commit()
+
+    queue_rate_limited = False
+    disabled_topics: set[str] = set()
 
     for stored in pending_jobs:
         job = stored.to_job()
@@ -300,39 +374,79 @@ def send_pending_jobs(
             log.info("Skipped job with no matching topics: %s", job.title)
             continue
 
-        already_sent = get_sent_topic_keys(conn, stored.id)
-        topics_to_send = [topic for topic in target_topics if topic not in already_sent]
+        deadline_at = _delivery_deadline(stored.first_seen_at)
+        ensure_topic_deliveries(conn, stored.id, target_topics, deadline_at)
+        conn.commit()  # durable outbox before any network call
+
+        states = get_topic_delivery_states(conn, stored.id)
+        topics_to_send = [
+            topic
+            for topic in target_topics
+            if topic not in disabled_topics and _topic_ready(states.get(topic), now)
+        ]
 
         if not topics_to_send:
-            set_job_send_status(conn, stored.id, "sent")
+            status = _aggregate_delivery_status(target_topics, states)
+            set_job_send_status(conn, stored.id, status)
             conn.commit()
-            processed += 1
-            log.info("Already sent to all topics: %s", job.title)
+            if status not in {"retry", "partial"}:
+                processed += 1
             continue
 
-        results = sender(job, topics_to_send)
-
         for topic_key in topics_to_send:
-            success = bool(results.get(topic_key, False))
-            error = "" if success else "send failed or topic not configured"
-            record_topic_send(conn, stored.id, topic_key, success, error=error)
-            if success:
+            # Claim + commit before send. If the process dies after Telegram accepted
+            # the message, the next run recovers this as UNKNOWN rather than blindly
+            # retrying and potentially duplicating it.
+            mark_topic_sending(conn, stored.id, topic_key, reference_time=now)
+            conn.commit()
+
+            raw_results = sender(job, [topic_key]) or {}
+            result = _coerce_send_result(raw_results.get(topic_key, False))
+            record_delivery_result(
+                conn,
+                stored.id,
+                topic_key,
+                outcome=result.outcome,
+                error=result.error,
+                http_status=result.http_status,
+                tg_error_code=result.tg_error_code,
+                retry_after_s=result.retry_after_s,
+                telegram_message_id=result.message_id,
+                fallback_used=result.fallback_used,
+                reference_time=now,
+            )
+            conn.commit()
+
+            if result.success:
                 successes += 1
             else:
                 failures += 1
 
-        sent_topics = get_sent_topic_keys(conn, stored.id)
-        status = _aggregate_send_status(target_topics, sent_topics)
+            if result.outcome == CONFIG_ERROR:
+                disabled_topics.add(topic_key)
+                log.error("Disabled topic for the rest of this run after CONFIG_ERROR: %s", topic_key)
+
+            if result.outcome == RATE_LIMITED:
+                queue_rate_limited = True
+                retry_after = max(1, int(result.retry_after_s or 60))
+                blocked_until = iso_utc(now + timedelta(seconds=retry_after))
+                set_metadata(conn, TELEGRAM_BLOCKED_UNTIL_KEY, blocked_until)
+                conn.commit()
+                log.warning(
+                    "Telegram rate-limited the group; stopping this run's send queue until %s.",
+                    blocked_until,
+                )
+                break
+
+        states = get_topic_delivery_states(conn, stored.id)
+        status = _aggregate_delivery_status(target_topics, states)
         set_job_send_status(conn, stored.id, status)
         conn.commit()
-
         processed += 1
-        log.info(
-            "%s: attempted %s topics, status=%s",
-            job.title,
-            len(topics_to_send),
-            status,
-        )
+        log.info("%s: delivery status=%s", job.title, status)
+
+        if queue_rate_limited:
+            break
 
     return processed, successes, failures, skipped
 
@@ -382,6 +496,11 @@ def run_bot(
         summary.expired_queue_jobs = expire_stale_unsent_jobs(
             conn,
             max_age_minutes=PENDING_SEND_MAX_AGE_MINUTES,
+            reference_time=run_reference,
+        )
+        summary.ambiguous_deliveries_recovered = recover_stale_sending_deliveries(
+            conn,
+            stale_after_minutes=10,
             reference_time=run_reference,
         )
         if summary.expired_backlog_jobs or summary.expired_queue_jobs:
@@ -453,6 +572,7 @@ def run_bot(
                 limit=max_jobs_per_run,
                 sender=sender,
                 router=router,
+                reference_time=run_reference,
             )
             summary.pending_processed = processed
             summary.topic_send_successes = successes

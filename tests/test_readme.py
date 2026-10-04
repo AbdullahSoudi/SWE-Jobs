@@ -47,6 +47,7 @@ class ReadmeDocumentationTests(unittest.TestCase):
             "test_main_sqlite.py",
             "test_routing.py",
             "test_sources_registry.py",
+            "test_telegram_sender.py",
             "test_workflow.py",
             "test_wuzzuf.py",
         ]:

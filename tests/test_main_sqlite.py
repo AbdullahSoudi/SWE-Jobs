@@ -135,7 +135,7 @@ class MainSqliteFlowTests(unittest.TestCase):
             )
             self.assertEqual(summary1.topic_send_successes, 1)
             self.assertEqual(summary1.topic_send_failures, 1)
-            self.assertEqual(calls[-1], ["general", "backend"])
+            self.assertEqual(calls[-2:], [["general"], ["backend"]])
 
             with connect(db_path) as conn:
                 pending = get_jobs_for_sending(conn)
@@ -451,6 +451,102 @@ class MainSqliteFlowTests(unittest.TestCase):
             self.assertEqual(summary.topic_send_successes, 0)
             with connect(db_path) as conn:
                 self.assertEqual(count_jobs(conn), 0)
+
+    def test_rate_limit_stops_wider_queue_and_persists_retry_after(self):
+        from telegram_sender import RATE_LIMITED, TelegramSendResult
+
+        jobs = [
+            Job(
+                title=f"Backend Developer {i}",
+                company="Acme",
+                location="Cairo, Egypt",
+                url=f"https://wuzzuf.net/jobs/p/rate-{i}",
+                source="wuzzuf",
+                tags=["Python"],
+            )
+            for i in (1, 2)
+        ]
+        calls = []
+
+        def limited_sender(job_obj, topics):
+            calls.append(job_obj.title)
+            topic = topics[0]
+            return {
+                topic: TelegramSendResult(
+                    False, RATE_LIMITED, "Too Many Requests",
+                    http_status=429, tg_error_code=429, retry_after_s=20,
+                )
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
+            summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: jobs)],
+                sender=limited_sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(summary.topic_send_failures, 1)
+            with connect(db_path) as conn:
+                delivery = conn.execute(
+                    "SELECT status, retry_after_s FROM job_sends ORDER BY id LIMIT 1"
+                ).fetchone()
+                self.assertEqual(delivery["status"], "retry_wait")
+                self.assertEqual(delivery["retry_after_s"], 20)
+                self.assertEqual(len(get_jobs_for_sending(conn)), 2)
+
+            # retry_after pauses the whole supergroup queue, not just this row.
+            second = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: jobs)],
+                sender=lambda job_obj, topics: calls.append("should-not-send") or {topics[0]: True},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now + timedelta(seconds=10),
+            )
+            self.assertEqual(second.topic_send_successes, 0)
+            self.assertNotIn("should-not-send", calls)
+
+    def test_unknown_delivery_becomes_terminal_not_blindly_retried(self):
+        from telegram_sender import UNKNOWN, TelegramSendResult
+
+        job = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://wuzzuf.net/jobs/p/ambiguous",
+            source="wuzzuf",
+            tags=["Python"],
+        )
+        calls = []
+
+        def ambiguous_sender(job_obj, topics):
+            calls.append(job_obj.title)
+            return {topics[0]: TelegramSendResult(False, UNKNOWN, "ReadTimeout")}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
+            main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [job])],
+                sender=ambiguous_sender,
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            with connect(db_path) as conn:
+                row = conn.execute("SELECT send_status FROM jobs").fetchone()
+                self.assertEqual(row["send_status"], "unknown")
+                self.assertEqual(get_jobs_for_sending(conn), [])
+            self.assertEqual(calls, ["Backend Developer"])
 
 
 if __name__ == "__main__":

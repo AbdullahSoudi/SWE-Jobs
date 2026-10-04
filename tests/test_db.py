@@ -124,7 +124,7 @@ class DbLayerTests(unittest.TestCase):
                     "SELECT status, error FROM job_sends WHERE job_id = ? AND topic_key = 'qa'",
                     (job_id,),
                 ).fetchone()
-                self.assertEqual(row["status"], "failed")
+                self.assertEqual(row["status"], "retry_wait")
                 self.assertEqual(row["error"], "Telegram timeout")
 
                 update_source_run(conn, "wuzzuf", "ok", last_run_at="2026-05-24T00:00:00Z")
@@ -180,7 +180,7 @@ class DbLayerTests(unittest.TestCase):
                     Job("Product Manager", "Product Co", "Remote", "https://jobs.example.com/pm", "linkedin"),
                 )
                 with self.assertRaises(ValueError):
-                    set_job_send_status(conn, job_id, "unknown")
+                    set_job_send_status(conn, job_id, "not-a-real-status")
 
     def test_hash_is_stable_for_tracking_url_variants(self):
         base = Job("Backend Developer", "Acme LLC", "Cairo", "https://x.test/j/1", "wuzzuf")
@@ -250,7 +250,7 @@ class FreshnessSchemaV3Tests(unittest.TestCase):
                 row = conn.execute("SELECT * FROM source_runs WHERE source = 'linkedin'").fetchone()
                 self.assertEqual(row["last_success_at"], "2026-10-04T12:00:00Z")
                 self.assertEqual(row["baselined_at"], "2026-10-04T12:00:00Z")
-                self.assertEqual(get_metadata(conn, "schema_version"), "3")
+                self.assertEqual(get_metadata(conn, "schema_version"), "4")
 
     def test_new_source_does_not_auto_baseline_across_reconnects(self):
         from db import is_source_baselined, mark_source_baselined
@@ -279,3 +279,63 @@ class FreshnessSchemaV3Tests(unittest.TestCase):
                 self.assertEqual(state["last_run_at"], "2026-10-04T15:15:00Z")
                 self.assertEqual(state["consecutive_failures"], 1)
                 self.assertEqual(state["status"], "failed")
+
+
+class DeliverySchemaV4Tests(unittest.TestCase):
+    def test_delivery_attempt_audit_and_retry_after_are_persisted(self):
+        from db import ensure_topic_deliveries, record_delivery_result, get_topic_delivery_states
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            reference = datetime(2026, 10, 4, 18, 0, tzinfo=UTC)
+            with connect(db_path) as conn:
+                job_id, _ = upsert_job(
+                    conn,
+                    Job("Backend Developer", "Acme", "Riyadh", "https://x.test/429", "linkedin"),
+                )
+                ensure_topic_deliveries(conn, job_id, ["backend"], "2026-10-04T19:00:00Z")
+                record_delivery_result(
+                    conn,
+                    job_id,
+                    "backend",
+                    outcome="RATE_LIMITED",
+                    error="Too Many Requests",
+                    http_status=429,
+                    tg_error_code=429,
+                    retry_after_s=17,
+                    reference_time=reference,
+                )
+                state = get_topic_delivery_states(conn, job_id)["backend"]
+                self.assertEqual(state["status"], "retry_wait")
+                self.assertEqual(state["last_error_class"], "RATE_LIMITED")
+                self.assertEqual(state["retry_after_s"], 17)
+                self.assertEqual(state["next_attempt_at"], "2026-10-04T18:00:17Z")
+                attempt = conn.execute(
+                    "SELECT * FROM delivery_attempts WHERE job_id = ? AND topic_key = 'backend'",
+                    (job_id,),
+                ).fetchone()
+                self.assertEqual(attempt["outcome"], "RATE_LIMITED")
+                self.assertEqual(attempt["http_status"], 429)
+
+    def test_stale_sending_is_recovered_as_unknown_not_retried(self):
+        from db import ensure_topic_deliveries, mark_topic_sending, recover_stale_sending_deliveries
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "jobs.db")
+            old = datetime(2026, 10, 4, 17, 30, tzinfo=UTC)
+            now = datetime(2026, 10, 4, 18, 0, tzinfo=UTC)
+            with connect(db_path) as conn:
+                job_id, _ = upsert_job(
+                    conn,
+                    Job("QA Engineer", "Acme", "Riyadh", "https://x.test/unknown", "linkedin"),
+                )
+                ensure_topic_deliveries(conn, job_id, ["qa"], "2026-10-04T19:00:00Z")
+                mark_topic_sending(conn, job_id, "qa", reference_time=old)
+                recovered = recover_stale_sending_deliveries(conn, 10, reference_time=now)
+                self.assertEqual(recovered, 1)
+                row = conn.execute(
+                    "SELECT status, last_error_class FROM job_sends WHERE job_id = ? AND topic_key = 'qa'",
+                    (job_id,),
+                ).fetchone()
+                self.assertEqual(row["status"], "unknown")
+                self.assertEqual(row["last_error_class"], "UNKNOWN")
