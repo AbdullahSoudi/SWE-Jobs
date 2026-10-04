@@ -14,7 +14,7 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
 - **Per-source run history:** fetch counts, freshness outcomes, failures, duration, shadow yield, coverage gaps, and health status are stored for later source scoring.
 - **Per-source scheduling:** the workflow still wakes every 15 minutes, but individual ATS tenants persist `next_poll_at` and can run every 30–60 minutes without wasting requests.
-- **SQLite state:** jobs, source state, freshness evidence, delivery state, and delivery attempts live in `jobs.db`.
+- **SQLite state:** jobs, source postings, source state, freshness evidence, delivery state, and delivery attempts live in `jobs.db`.
 - **Durable Telegram outbox:** delivery state is written before the network call.
 - **Measured bilingual classifier:** English + Arabic tech-title classification drives both broad LinkedIn filtering and the single primary Telegram topic.
 - **Market/source as metadata:** Egypt/Saudi/Remote and the source are shown in the message instead of creating duplicate topic posts.
@@ -148,7 +148,7 @@ coverage_gap / shadow_mode
 
 `source_runs` also keeps the latest health snapshot and consecutive failure/empty-run counters. A warning is logged after repeated successful zero-result fetches.
 
-This supports measured source promotion rather than enabling a new feed on intuition alone. `source_observations` and `source_analytics.py` now provide first-discovery, lead-time, and mature 24-hour exclusive metrics for sources that observe the same normalized job.
+This supports measured source promotion rather than enabling a new feed on intuition alone. `source_observations` and `source_analytics.py` now provide first-discovery, lead-time, and mature 24-hour exclusive metrics for sources that observe the same clustered real-world opening.
 
 ## Telegram Topics
 
@@ -349,7 +349,7 @@ save jobs.db to data branch
 
 ## Source Analytics (Shadow Evaluation)
 
-Schema v6 introduced source observations; the current SQLite schema is v7 and adds persisted source scheduling/health state.
+Schema v6 introduced source observations, v7 added persisted source scheduling/health state, and the current schema is v8 with posting-level identity plus conservative cross-source job clustering.
 This lets the bot compare production LinkedIn with `linkedin_saudi_v2` without
 credit depending on which source happened to be processed first. No historical
 source-discovery order is fabricated; observation analytics starts when v6 is deployed.
@@ -375,6 +375,25 @@ python source_analytics.py --db jobs.db --hours 168 --saudi-only linkedin linked
 
 The raw/relevant run counters are source-wide. The discovery/first/exclusive
 metrics honor `--saudi-only`, so they are the fair part of the Saudi V2 comparison.
+
+
+### Cross-source deduplication (schema v8)
+
+`jobs` now represents a real-world opening/cluster while `job_postings` keeps every source-specific posting that points to it. Source identity is checked first using `(source, source_job_id)` or the canonical URL. Only previously unseen postings are considered for conservative cross-source clustering.
+
+Automatic clustering intentionally prefers false splits over false merges. A fuzzy merge requires:
+
+- a confirmed normalized company match (with only curated aliases from `companies/company_aliases.json`),
+- a compatible location (Saudi city normalization is supported),
+- at least three informative title tokens with strong Jaccard similarity,
+- no seniority, technology-stack, or internship/program conflict,
+- and a different source that is not already represented in the cluster.
+
+Short generic titles such as `QA Engineer` are not fuzzy-merged automatically. Reposts/new requisitions from the same source are also kept separate unless source identity or the canonical URL proves they are the same posting.
+
+When an official ATS posting and a LinkedIn posting cluster together, the delivery/discovery source remains unchanged, but `preferred_url` and `preferred_source` can upgrade to the higher-trust ATS link. This lets Telegram use the official apply URL without breaking shadow-to-production promotion logic.
+
+The v8 migration backfills exactly one `job_postings` row for every existing job without guessing historical merges; clustering only starts for observations after deployment.
 
 ## GitHub Actions
 
@@ -440,6 +459,7 @@ python main.py
 ├── models.py
 ├── db.py
 ├── freshness.py
+├── dedup.py
 ├── source_analytics.py
 ├── source_runtime.py
 ├── company_registry.py
@@ -449,7 +469,8 @@ python main.py
 ├── requirements.txt
 ├── README.md
 ├── companies/
-│   └── saudi_ats.json
+│   ├── saudi_ats.json
+│   └── company_aliases.json
 ├── sources/
 │   ├── __init__.py
 │   ├── ats.py
@@ -462,6 +483,7 @@ python main.py
 │   ├── test_ats_detector.py
 │   ├── test_company_registry.py
 │   ├── test_db.py
+│   ├── test_dedup.py
 │   ├── test_freshness.py
 │   ├── test_linkedin.py
 │   ├── test_main_sqlite.py

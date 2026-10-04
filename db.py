@@ -20,9 +20,10 @@ from typing import Iterator, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from models import Job
+from dedup import find_cross_source_match, source_trust
 
 DB_FILE = "jobs.db"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -53,6 +54,8 @@ class StoredJob:
     location: str
     url: str
     canonical_url: str
+    preferred_url: str
+    preferred_source: str
     salary: str
     job_type: str
     tags: list
@@ -76,13 +79,13 @@ class StoredJob:
             title=self.title,
             company=self.company,
             location=self.location,
-            url=self.url,
+            url=self.preferred_url or self.url,
             source=self.source,
             salary=self.salary,
             job_type=self.job_type,
             tags=self.tags,
             is_remote=self.is_remote,
-            original_source=self.original_source,
+            original_source=self.preferred_source or self.original_source,
             source_job_id=self.source_job_id,
             published_at_raw=self.published_at_raw,
             published_at_earliest=self.published_at_earliest,
@@ -137,6 +140,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             location TEXT DEFAULT '',
             url TEXT NOT NULL,
             canonical_url TEXT NOT NULL,
+            preferred_url TEXT DEFAULT '',
+            preferred_source TEXT DEFAULT '',
             salary TEXT DEFAULT '',
             job_type TEXT DEFAULT '',
             tags_json TEXT DEFAULT '[]',
@@ -161,6 +166,32 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_jobs_source
             ON jobs(source, last_seen_at);
+
+        CREATE TABLE IF NOT EXISTS job_postings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            source_job_id TEXT DEFAULT '',
+            posting_key TEXT NOT NULL,
+            url TEXT NOT NULL,
+            canonical_url TEXT NOT NULL,
+            title TEXT NOT NULL,
+            company TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            published_at_est TEXT DEFAULT '',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            match_method TEXT NOT NULL DEFAULT 'identity',
+            match_score REAL NOT NULL DEFAULT 1.0,
+            UNIQUE(source, posting_key),
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_job_postings_job
+            ON job_postings(job_id, source);
+
+        CREATE INDEX IF NOT EXISTS idx_job_postings_canonical_url
+            ON job_postings(canonical_url);
 
         CREATE TABLE IF NOT EXISTS job_sends (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,6 +343,12 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         _ensure_column(conn, "jobs", definition)
 
     for definition in (
+        "preferred_url TEXT DEFAULT ''",
+        "preferred_source TEXT DEFAULT ''",
+    ):
+        _ensure_column(conn, "jobs", definition)
+
+    for definition in (
         "last_success_at TEXT",
         "baselined_at TEXT",
         "consecutive_failures INTEGER NOT NULL DEFAULT 0",
@@ -331,6 +368,30 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
 
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS job_postings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            source_job_id TEXT DEFAULT '',
+            posting_key TEXT NOT NULL,
+            url TEXT NOT NULL,
+            canonical_url TEXT NOT NULL,
+            title TEXT NOT NULL,
+            company TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            published_at_est TEXT DEFAULT '',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            match_method TEXT NOT NULL DEFAULT 'identity',
+            match_score REAL NOT NULL DEFAULT 1.0,
+            UNIQUE(source, posting_key),
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_job_postings_job
+            ON job_postings(job_id, source);
+        CREATE INDEX IF NOT EXISTS idx_job_postings_canonical_url
+            ON job_postings(canonical_url);
+
         CREATE TABLE IF NOT EXISTS delivery_attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id INTEGER NOT NULL,
@@ -496,6 +557,49 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         )
 
 
+
+    if previous_version < 8:
+        # v8 introduces posting-level identity beneath the existing jobs table,
+        # which now represents a real-world opening/cluster. Backfill one legacy
+        # posting per existing job without guessing historical cross-source links.
+        conn.execute(
+            "UPDATE jobs SET preferred_url = COALESCE(NULLIF(preferred_url, ''), url), "
+            "preferred_source = COALESCE(NULLIF(preferred_source, ''), source)"
+        )
+        rows = conn.execute(
+            "SELECT id, source, source_job_id, url, canonical_url, title, company, location, "
+            "published_at_est, first_seen_at, last_seen_at FROM jobs ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            source = str(row["source"] or "legacy")
+            source_job_id = str(row["source_job_id"] or "")
+            canonical_url = str(row["canonical_url"] or row["url"] or "")
+            posting_key = _posting_key(source_job_id, canonical_url, fallback=f"legacy:{row['id']}")
+            collision = conn.execute(
+                "SELECT job_id FROM job_postings WHERE source = ? AND posting_key = ?",
+                (source, posting_key),
+            ).fetchone()
+            if collision and int(collision["job_id"]) != int(row["id"]):
+                # Do not guess historical merges during migration. Preserve every
+                # legacy cluster even when old rows reused the same source URL/ID.
+                posting_key = f"{posting_key}:legacy:{row['id']}"
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO job_postings(
+                    job_id, source, source_job_id, posting_key, url, canonical_url,
+                    title, company, location, published_at_est, first_seen_at,
+                    last_seen_at, match_method, match_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy', 1.0)
+                """,
+                (
+                    int(row["id"]), source, source_job_id, posting_key,
+                    str(row["url"] or ""), canonical_url, str(row["title"] or ""),
+                    str(row["company"] or ""), str(row["location"] or ""),
+                    str(row["published_at_est"] or ""), str(row["first_seen_at"] or now_utc()),
+                    str(row["last_seen_at"] or row["first_seen_at"] or now_utc()),
+                ),
+            )
+
 def now_utc() -> str:
     """Return an ISO-8601 UTC timestamp without microseconds."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -603,10 +707,8 @@ def canonicalize_url(url: str) -> str:
 
 
 def job_content_hash(job: Job) -> str:
-    """Create a cross-source dedup hash for the job identity."""
+    """Create the stable legacy row hash used when a new cluster is created."""
     canonical_url = canonicalize_url(job.url)
-    # Prefer URL when available because job boards often have stable job IDs in URLs.
-    # Include title/company/location to reduce the risk of unrelated redirect URLs merging.
     raw = "|".join(
         [
             normalize_text(job.title),
@@ -618,79 +720,285 @@ def job_content_hash(job: Job) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
-    """
-    Insert or refresh a job.
+def _posting_key(source_job_id: str, canonical_url: str, *, fallback: str = "") -> str:
+    """Build an identity scoped to one source."""
+    source_job_id = str(source_job_id or "").strip()
+    if source_job_id:
+        return "id:" + source_job_id
+    canonical_url = str(canonical_url or "").strip()
+    if canonical_url:
+        digest = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()
+        return "url:" + digest
+    if fallback:
+        return fallback
+    raise ValueError("Posting requires source_job_id or canonical_url")
 
-    Returns:
-        (job_id, is_new)
+
+def _insert_or_refresh_posting(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    job: Job,
+    canonical_url: str,
+    posting_key: str,
+    match_method: str,
+    match_score: float,
+    timestamp: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO job_postings(
+            job_id, source, source_job_id, posting_key, url, canonical_url,
+            title, company, location, published_at_est, first_seen_at,
+            last_seen_at, match_method, match_score
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source, posting_key) DO UPDATE SET
+            job_id = excluded.job_id,
+            source_job_id = excluded.source_job_id,
+            url = excluded.url,
+            canonical_url = excluded.canonical_url,
+            title = excluded.title,
+            company = excluded.company,
+            location = excluded.location,
+            published_at_est = COALESCE(NULLIF(excluded.published_at_est, ''), job_postings.published_at_est),
+            last_seen_at = excluded.last_seen_at,
+            match_method = excluded.match_method,
+            match_score = excluded.match_score
+        """,
+        (
+            job_id,
+            job.source,
+            str(job.source_job_id or ""),
+            posting_key,
+            job.url,
+            canonical_url,
+            job.title,
+            job.company or "",
+            job.location or "",
+            job.published_at_est or "",
+            timestamp,
+            timestamp,
+            match_method,
+            float(match_score),
+        ),
+    )
+
+
+def _maybe_upgrade_preferred_link(
+    conn: sqlite3.Connection,
+    job_id: int,
+    job: Job,
+) -> None:
+    """Prefer official ATS apply links without changing the delivery source."""
+    row = conn.execute(
+        "SELECT source, preferred_source, preferred_url FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return
+    current_source_key = str(row["source"] or "")
+    preferred_label = str(row["preferred_source"] or current_source_key)
+
+    # preferred_source is a display label for ATS postings, so infer current
+    # trust from the cluster's primary source unless the preferred URL already
+    # came from an ATS observation.
+    current_trust = source_trust(current_source_key)
+    preferred_row = conn.execute(
+        """
+        SELECT source FROM job_postings
+        WHERE job_id = ? AND canonical_url = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (job_id, canonicalize_url(str(row["preferred_url"] or ""))),
+    ).fetchone()
+    if preferred_row:
+        current_trust = source_trust(str(preferred_row["source"] or current_source_key))
+
+    incoming_trust = source_trust(job.source)
+    if incoming_trust <= current_trust:
+        return
+    conn.execute(
+        "UPDATE jobs SET preferred_url = ?, preferred_source = ? WHERE id = ?",
+        (job.url, job.original_source or job.source, job_id),
+    )
+
+
+def _refresh_cluster_from_primary_source(
+    conn: sqlite3.Connection,
+    job_id: int,
+    job: Job,
+    *,
+    canonical_url: str,
+    timestamp: str,
+) -> None:
+    """Refresh canonical metadata only when the same primary source is seen."""
+    row = conn.execute("SELECT source FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not row:
+        return
+    if str(row["source"] or "") != str(job.source or ""):
+        conn.execute("UPDATE jobs SET last_seen_at = ? WHERE id = ?", (timestamp, job_id))
+        _maybe_upgrade_preferred_link(conn, job_id, job)
+        return
+
+    tags_json = json.dumps(job.tags or [], ensure_ascii=False, sort_keys=True)
+    conn.execute(
+        """
+        UPDATE jobs
+        SET title = ?, company = ?, location = ?,
+            url = ?, canonical_url = ?, salary = ?, job_type = ?, tags_json = ?,
+            is_remote = ?, original_source = ?,
+            published_at_raw = COALESCE(NULLIF(?, ''), published_at_raw),
+            published_at_earliest = COALESCE(NULLIF(?, ''), published_at_earliest),
+            published_at_latest = COALESCE(NULLIF(?, ''), published_at_latest),
+            published_at_est = COALESCE(NULLIF(?, ''), published_at_est),
+            published_precision = CASE WHEN ? != 'NONE' THEN ? ELSE published_precision END,
+            time_semantics = CASE WHEN ? != 'UNKNOWN' THEN ? ELSE time_semantics END,
+            last_seen_at = ?
+        WHERE id = ?
+        """,
+        (
+            job.title,
+            job.company or "",
+            job.location or "",
+            job.url,
+            canonical_url,
+            job.salary or "",
+            job.job_type or "",
+            tags_json,
+            1 if job.is_remote else 0,
+            job.original_source or "",
+            job.published_at_raw or "",
+            job.published_at_earliest or "",
+            job.published_at_latest or "",
+            job.published_at_est or "",
+            job.published_precision or "NONE",
+            job.published_precision or "NONE",
+            job.time_semantics or "UNKNOWN",
+            job.time_semantics or "UNKNOWN",
+            timestamp,
+            job_id,
+        ),
+    )
+    _maybe_upgrade_preferred_link(conn, job_id, job)
+
+
+def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
+    """Insert/refresh a posting and map it to a conservative cross-source cluster.
+
+    Returns ``(job_id, is_new_cluster)``. A newly observed source posting that
+    matches an existing real-world opening returns ``is_new_cluster=False``.
     """
     if not job.title or not job.url:
         raise ValueError("Job must have a title and url before persistence.")
 
     ts = now_utc()
     canonical_url = canonicalize_url(job.url)
-    content_hash = job_content_hash(job)
     source_job_id = str(job.source_job_id or "")
-    tags_json = json.dumps(job.tags or [], ensure_ascii=False, sort_keys=True)
+    posting_key = _posting_key(source_job_id, canonical_url)
 
+    # Strongest identity: the exact source posting has already been observed.
+    existing_posting = conn.execute(
+        "SELECT job_id FROM job_postings WHERE source = ? AND posting_key = ?",
+        (job.source, posting_key),
+    ).fetchone()
+    if existing_posting:
+        job_id = int(existing_posting["job_id"])
+        _insert_or_refresh_posting(
+            conn,
+            job_id=job_id,
+            job=job,
+            canonical_url=canonical_url,
+            posting_key=posting_key,
+            match_method="source_identity",
+            match_score=1.0,
+            timestamp=ts,
+        )
+        _refresh_cluster_from_primary_source(
+            conn, job_id, job, canonical_url=canonical_url, timestamp=ts
+        )
+        return job_id, False
+
+    # Same canonical apply URL across sources is also deterministic.
+    exact_url = conn.execute(
+        "SELECT job_id FROM job_postings WHERE canonical_url = ? ORDER BY id LIMIT 1",
+        (canonical_url,),
+    ).fetchone()
+    if exact_url:
+        job_id = int(exact_url["job_id"])
+        _insert_or_refresh_posting(
+            conn,
+            job_id=job_id,
+            job=job,
+            canonical_url=canonical_url,
+            posting_key=posting_key,
+            match_method="canonical_url",
+            match_score=1.0,
+            timestamp=ts,
+        )
+        _refresh_cluster_from_primary_source(
+            conn, job_id, job, canonical_url=canonical_url, timestamp=ts
+        )
+        return job_id, False
+
+    # Conservative fuzzy clustering only considers recent openings and only
+    # when company/location/title evidence is strong with no role veto.
+    recent_since = (
+        datetime.now(UTC) - timedelta(days=14)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    cluster = find_cross_source_match(conn, job, recent_since=recent_since)
+    if cluster:
+        job_id = cluster.job_id
+        _insert_or_refresh_posting(
+            conn,
+            job_id=job_id,
+            job=job,
+            canonical_url=canonical_url,
+            posting_key=posting_key,
+            match_method=cluster.method,
+            match_score=cluster.score,
+            timestamp=ts,
+        )
+        conn.execute("UPDATE jobs SET last_seen_at = ? WHERE id = ?", (ts, job_id))
+        _maybe_upgrade_preferred_link(conn, job_id, job)
+        return job_id, False
+
+    # Legacy exact hash fallback keeps URL tracking variants stable even if a
+    # v7 database was partially migrated or a posting row is missing.
+    content_hash = job_content_hash(job)
     existing = conn.execute(
         "SELECT id FROM jobs WHERE content_hash = ?",
         (content_hash,),
     ).fetchone()
-
     if existing:
         job_id = int(existing["id"])
-        conn.execute(
-            """
-            UPDATE jobs
-            SET title = ?, company = ?, location = ?,
-                url = ?, canonical_url = ?, salary = ?, job_type = ?, tags_json = ?,
-                is_remote = ?, original_source = ?,
-                published_at_raw = COALESCE(NULLIF(?, ''), published_at_raw),
-                published_at_earliest = COALESCE(NULLIF(?, ''), published_at_earliest),
-                published_at_latest = COALESCE(NULLIF(?, ''), published_at_latest),
-                published_at_est = COALESCE(NULLIF(?, ''), published_at_est),
-                published_precision = CASE WHEN ? != 'NONE' THEN ? ELSE published_precision END,
-                time_semantics = CASE WHEN ? != 'UNKNOWN' THEN ? ELSE time_semantics END,
-                last_seen_at = ?
-            WHERE id = ?
-            """,
-            (
-                job.title,
-                job.company or "",
-                job.location or "",
-                job.url,
-                canonical_url,
-                job.salary or "",
-                job.job_type or "",
-                tags_json,
-                1 if job.is_remote else 0,
-                job.original_source or "",
-                job.published_at_raw or "",
-                job.published_at_earliest or "",
-                job.published_at_latest or "",
-                job.published_at_est or "",
-                job.published_precision or "NONE",
-                job.published_precision or "NONE",
-                job.time_semantics or "UNKNOWN",
-                job.time_semantics or "UNKNOWN",
-                ts,
-                job_id,
-            ),
+        _insert_or_refresh_posting(
+            conn,
+            job_id=job_id,
+            job=job,
+            canonical_url=canonical_url,
+            posting_key=posting_key,
+            match_method="content_hash",
+            match_score=1.0,
+            timestamp=ts,
+        )
+        _refresh_cluster_from_primary_source(
+            conn, job_id, job, canonical_url=canonical_url, timestamp=ts
         )
         return job_id, False
 
+    tags_json = json.dumps(job.tags or [], ensure_ascii=False, sort_keys=True)
+    preferred_source = job.original_source or job.source
     cur = conn.execute(
         """
         INSERT INTO jobs (
             source, source_job_id, title, company, location, url, canonical_url,
-            salary, job_type, tags_json, is_remote, original_source,
-            content_hash, send_status, published_at_raw, published_at_earliest,
-            published_at_latest, published_at_est, published_precision, time_semantics,
+            preferred_url, preferred_source, salary, job_type, tags_json,
+            is_remote, original_source, content_hash, send_status,
+            published_at_raw, published_at_earliest, published_at_latest,
+            published_at_est, published_precision, time_semantics,
             freshness_status, freshness_reason, first_seen_at, last_seen_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 'UNKNOWN', '', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 'UNKNOWN', '', ?, ?)
         """,
         (
             job.source,
@@ -700,6 +1008,8 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             job.location or "",
             job.url,
             canonical_url,
+            job.url,
+            preferred_source,
             job.salary or "",
             job.job_type or "",
             tags_json,
@@ -716,8 +1026,18 @@ def upsert_job(conn: sqlite3.Connection, job: Job) -> tuple[int, bool]:
             ts,
         ),
     )
-    return int(cur.lastrowid), True
-
+    job_id = int(cur.lastrowid)
+    _insert_or_refresh_posting(
+        conn,
+        job_id=job_id,
+        job=job,
+        canonical_url=canonical_url,
+        posting_key=posting_key,
+        match_method="new_cluster",
+        match_score=1.0,
+        timestamp=ts,
+    )
+    return job_id, True
 
 def upsert_jobs(conn: sqlite3.Connection, jobs: list[Job]) -> tuple[int, int]:
     """Persist many jobs and return (inserted_count, refreshed_count)."""
@@ -1313,6 +1633,20 @@ def count_jobs(conn: sqlite3.Connection) -> int:
     return int(row["c"])
 
 
+def count_postings(conn: sqlite3.Connection) -> int:
+    """Return total source postings mapped to job clusters."""
+    row = conn.execute("SELECT COUNT(*) AS c FROM job_postings").fetchone()
+    return int(row["c"])
+
+
+def get_job_postings(conn: sqlite3.Connection, job_id: int) -> list[sqlite3.Row]:
+    """Return all source postings currently mapped to one cluster."""
+    return conn.execute(
+        "SELECT * FROM job_postings WHERE job_id = ? ORDER BY first_seen_at, id",
+        (int(job_id),),
+    ).fetchall()
+
+
 def _row_to_stored_job(row: sqlite3.Row) -> StoredJob:
     tags = []
     try:
@@ -1330,6 +1664,8 @@ def _row_to_stored_job(row: sqlite3.Row) -> StoredJob:
         location=row["location"] or "",
         url=row["url"],
         canonical_url=row["canonical_url"],
+        preferred_url=(row["preferred_url"] or "") if "preferred_url" in row.keys() else row["url"],
+        preferred_source=(row["preferred_source"] or "") if "preferred_source" in row.keys() else row["source"],
         salary=row["salary"] or "",
         job_type=row["job_type"] or "",
         tags=tags,

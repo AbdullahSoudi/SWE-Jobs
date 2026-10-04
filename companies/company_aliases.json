@@ -1,0 +1,10 @@
+[
+  {
+    "canonical": "hpe",
+    "aliases": ["HPE", "Hewlett Packard Enterprise"]
+  },
+  {
+    "canonical": "stc",
+    "aliases": ["STC", "Saudi Telecom Company", "Saudi Telecom"]
+  }
+]
