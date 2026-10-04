@@ -25,6 +25,7 @@ class SourceRegistryTests(unittest.TestCase):
                 "WUZZUF",
                 "LinkedIn",
                 "LinkedIn Saudi V2",
+                "Jobzaty",
                 "ATS Greenhouse hala",
                 "ATS Greenhouse minio",
                 "ATS Lever soum",
@@ -52,6 +53,7 @@ class SourceRegistryTests(unittest.TestCase):
         self.assertEqual(intervals["wuzzuf"], 15)
         self.assertEqual(intervals["linkedin"], 15)
         self.assertEqual(intervals["linkedin_saudi_v2"], 15)
+        self.assertEqual(intervals["jobzaty"], 60)
         self.assertEqual(intervals["ats_greenhouse_hala"], 30)
         self.assertEqual(intervals["ats_greenhouse_minio"], 60)
         self.assertEqual(intervals["ats_workday_cisco"], 60)
@@ -90,6 +92,8 @@ class SourceRegistryTests(unittest.TestCase):
     def test_registry_contains_only_expected_core_fetcher_names(self):
         core_names = {fetcher.__name__ for _, fetcher in self.registry.CORE_FETCHERS}
         self.assertEqual(core_names, {"fetch_wuzzuf", "fetch_linkedin", "fetch_linkedin_saudi_v2"})
+        self.assertEqual(len(self.registry.SHADOW_BOARD_FETCHERS), 1)
+        self.assertEqual(self.registry.SHADOW_BOARD_FETCHERS[0][1].__name__, "fetch_jobzaty")
         self.assertEqual(len(self.registry.ATS_FETCHERS), 18)
 
 

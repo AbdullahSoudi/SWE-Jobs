@@ -22,6 +22,7 @@ from typing import Callable, Iterable
 from config import (
     ATS_OBSERVATION_MAX_AGE_MINUTES,
     DEFAULT_SOURCE_FRESHNESS_POLICY,
+    DISCOVERY_ONLY_SOURCE_KEYS,
     LEGACY_BACKLOG_MAX_AGE_MINUTES,
     MAX_JOBS_PER_RUN,
     PENDING_SEND_MAX_AGE_MINUTES,
@@ -49,6 +50,7 @@ from cleanup import cleanup_join_messages
 from freshness import (
     BASELINE,
     UNCERTAIN,
+    FreshnessGateDecision,
     PublicationEvidence,
     ensure_utc,
     evaluate_new_posting,
@@ -254,7 +256,7 @@ def should_keep_job(job: Job) -> bool:
         return False
 
     source = _source_key(job.source)
-    if source in {"linkedin", "linkedin_saudi_v2"} or source.startswith("ats_"):
+    if source in {"linkedin", "linkedin_saudi_v2", "jobzaty"} or source.startswith("ats_"):
         return is_tech_job(job) and passes_geo_filter(job)
 
     return is_programming_job(job) and passes_geo_filter(job)
@@ -348,6 +350,12 @@ def persist_filtered_jobs(
             uncertain_fallback=str(policy.get("uncertain_fallback", "NONE")),
             reference_time=now,
         )
+        if context.was_baselined and source_key in {_source_key(value) for value in DISCOVERY_ONLY_SOURCE_KEYS}:
+            decision = FreshnessGateDecision(
+                UNCERTAIN,
+                "discovery_only_source",
+                False,
+            )
         job_id, is_new = upsert_job(conn, job)
         record_source_observation(
             conn,
@@ -363,13 +371,19 @@ def persist_filtered_jobs(
             refreshed += 1
             metrics.refreshed_jobs += 1
 
-            # Shadow observations must never poison production discovery. If a
-            # production source later sees a still-fresh job that was first
-            # discovered by a shadow source, promote it into the delivery queue.
+            # Non-production observations must never poison production discovery.
+            # A shadow/discovery-only source may see the opening first and store it
+            # as shadow, skipped, or expired. If a *different* production source
+            # later sees the same cluster with trustworthy fresh evidence, promote
+            # that cluster into the delivery queue. Ambiguous/sent/retry states are
+            # deliberately excluded to avoid duplicate Telegram delivery.
+            existing_status = get_job_send_status(conn, job_id)
+            primary_source = _source_key(get_job_primary_source(conn, job_id))
             if (
                 not _is_shadow_source(source_key, production_source_keys)
-                and get_job_send_status(conn, job_id) == "shadow"
-                and _source_key(get_job_primary_source(conn, job_id)) != source_key
+                and primary_source != source_key
+                and _is_shadow_source(primary_source, production_source_keys)
+                and existing_status in {"shadow", "skipped", "expired"}
             ):
                 set_job_freshness_state(conn, job_id, decision.status, decision.reason)
                 if decision.send_eligible:

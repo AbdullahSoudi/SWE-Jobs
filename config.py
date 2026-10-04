@@ -693,6 +693,7 @@ SOURCE_DISPLAY = {
     "wuzzuf": "WUZZUF",
     "linkedin": "LinkedIn",
     "linkedin_saudi_v2": "LinkedIn Saudi V2 (Shadow)",
+    "jobzaty": "Jobzaty Discovery (Shadow)",
 }
 
 # ─── Misc ────────────────────────────────────────────────────
@@ -724,6 +725,10 @@ SOURCE_FRESHNESS_POLICIES = {
         "max_age_seconds": WUZZUF_OBSERVATION_MAX_AGE_MINUTES * 60,
         "uncertain_fallback": "RECENT_OBSERVATION",
     },
+    "jobzaty": {
+        "max_age_seconds": 60 * 60,
+        "uncertain_fallback": "NONE",
+    },
 }
 
 DEFAULT_SOURCE_FRESHNESS_POLICY = {
@@ -735,6 +740,11 @@ DEFAULT_SOURCE_FRESHNESS_POLICY = {
 # runs in shadow mode by default: fetch, normalize, persist and measure, but
 # never send. Promotion is therefore an explicit code/config decision.
 PRODUCTION_SOURCE_KEYS = {"linkedin", "wuzzuf"}
+
+# Discovery-only sources may be useful for coverage/ATS discovery metrics but
+# do not currently provide freshness evidence strong enough for a real-time feed.
+# Removing a key from this set must be an explicit future product decision.
+DISCOVERY_ONLY_SOURCE_KEYS = {"jobzaty"}
 
 # Health signal only; zero-result runs are persisted for later analysis and a
 # warning is emitted after this many consecutive successful empty fetches.

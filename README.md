@@ -8,7 +8,7 @@ The product goal is a real-time job feed, not a historical job archive:
 
 ## Current Design
 
-- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2 and an evidence-driven shadow ATS company registry (Greenhouse, Lever, Ashby, Workday).
+- **Sources:** WUZZUF + production LinkedIn, plus shadow Saudi LinkedIn V2, a low-rate Jobzaty discovery feed, and an evidence-driven shadow ATS company registry (Greenhouse, Lever, Ashby, Workday).
 - **Fresh-only gate:** old or uncertain jobs are stored for dedup/audit but are not posted late.
 - **Source baselines:** the first successful fetch of a new source never sends its existing backlog.
 - **Shadow-by-default sources:** any source not explicitly promoted to production is measured and stored but cannot send to Telegram. Shadow discovery cannot suppress a later fresh production discovery of the same job.
@@ -30,6 +30,7 @@ Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core f
 | WUZZUF | Production | Public category/search cards; mainly Egypt |
 | LinkedIn | Production | Existing public guest search strategy |
 | LinkedIn Saudi V2 | Shadow | Saudi `geoId=100459316`, broad country search + ERP/business-systems gap fillers |
+| Jobzaty Discovery | Shadow · discovery-only | Public Saudi programming/cybersecurity/IT category cards · 60 min poll · never sends |
 | HALA | Shadow ATS | Greenhouse public job board · 30 min poll |
 | MinIO | Shadow ATS | Greenhouse public job board, Saudi rows only · 60 min poll |
 | SOUM | Shadow ATS | Lever public postings API · 30 min poll |
@@ -51,6 +52,14 @@ Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core f
 | Legacy aggregators | Disabled | Not registered at runtime |
 
 All ATS feeds are shadow by default because their generated source keys are not in `PRODUCTION_SOURCE_KEYS`. Their first successful fetch establishes a no-send baseline, then later newly observed jobs can be measured without Telegram delivery.
+
+### Saudi job-board discovery
+
+`Jobzaty Discovery` is intentionally **not** a production job source. It reads only three narrow public Saudi category pages (`programming-web-development`, `cybersecurity-jobs`, and `information-technology`) once per hour, deduplicates by Jobzaty listing ID, and records the cards for coverage/source-overlap measurement. The category label is retained as a classifier tag.
+
+Jobzaty cards do not prove minute-level publication time and some listings are multi-role announcements rather than one requisition. The source key therefore also lives in `DISCOVERY_ONLY_SOURCE_KEYS`: even an apparently fresh timestamp in a future parser cannot create a Telegram delivery until that guard is deliberately removed. This lets us measure Saudi coverage without weakening the bot's **freshness > quantity** rule.
+
+This integration does not log in, submit forms, bypass access controls, or crawl the archive. It is deliberately low-rate and shadow-only.
 
 ### Saudi ATS company registry
 
@@ -88,7 +97,7 @@ The adapters live in `sources/ats.py` and use public career-site read endpoints 
 
 ### Source scheduling and health
 
-GitHub Actions still starts the bot every 15 minutes, but Update 10 no longer fetches every source on every workflow run. `source_runs` persists `poll_interval_minutes`, `next_poll_at`, `health_status`, and `last_nonempty_at`. Core feeds (`linkedin`, `wuzzuf`, and the Saudi V2 shadow comparison) remain on a 15-minute cadence. ATS companies use the interval declared in `companies/saudi_ats.json`; the initial registry uses 30–60 minute polls.
+GitHub Actions still starts the bot every 15 minutes, but Update 10 no longer fetches every source on every workflow run. `source_runs` persists `poll_interval_minutes`, `next_poll_at`, `health_status`, and `last_nonempty_at`. Core feeds (`linkedin`, `wuzzuf`, and the Saudi V2 shadow comparison) remain on a 15-minute cadence. Jobzaty discovery runs hourly. ATS companies use the interval declared in `companies/saudi_ats.json`; the initial registry uses 30–60 minute polls.
 
 A successful source schedules its next normal poll at its configured interval. A failed source retries on the next 15-minute workflow cycle even when its normal cadence is slower. Sources that are not due are skipped without blocking the Telegram delivery queue.
 
@@ -477,7 +486,8 @@ python main.py
 │   ├── http_utils.py
 │   ├── wuzzuf.py
 │   ├── linkedin.py
-│   └── linkedin_saudi_v2.py
+│   ├── linkedin_saudi_v2.py
+│   └── jobzaty.py
 ├── tests/
 │   ├── test_ats.py
 │   ├── test_ats_detector.py
@@ -486,6 +496,7 @@ python main.py
 │   ├── test_dedup.py
 │   ├── test_freshness.py
 │   ├── test_linkedin.py
+│   ├── test_jobzaty.py
 │   ├── test_main_sqlite.py
 │   ├── test_readme.py
 │   ├── test_routing.py
@@ -507,5 +518,5 @@ python main.py
 - Old Telegram topics do not need to be deleted immediately; they simply stop receiving new jobs.
 - Do not publish full job descriptions in the group; cards intentionally stay compact.
 - LinkedIn remains a fragile dependency; Saudi ATS/company feeds now provide the first diversification layer.
-- New Saudi sources should be added to the registry/fetch layer first, observed in shadow mode, and promoted only after their freshness/relevance/reliability/lead-time metrics look healthy.
+- New Saudi sources should be added to the registry/fetch layer first, observed in shadow mode, and promoted only after their freshness/relevance/reliability/lead-time metrics look healthy. Discovery-only feeds must additionally prove safe publication-time semantics before they can ever be promoted.
 - Keep the ATS registry small and evidence-driven. Add employers because current data shows useful Saudi tech hiring, not simply to maximize company count.

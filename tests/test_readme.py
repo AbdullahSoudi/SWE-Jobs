@@ -22,6 +22,8 @@ class ReadmeDocumentationTests(unittest.TestCase):
         self.assertIn("Workday", self.text)
         self.assertIn("discover_ats_candidates", self.text)
         self.assertIn("companies/saudi_ats.json", self.text)
+        self.assertIn("Jobzaty", self.text)
+        self.assertIn("discovery-only", self.text.lower())
 
     def test_readme_documents_single_primary_topic_design(self):
         self.assertIn("one primary topic", self.text.lower())
@@ -55,6 +57,7 @@ class ReadmeDocumentationTests(unittest.TestCase):
             "test_db.py",
             "test_freshness.py",
             "test_linkedin.py",
+            "test_jobzaty.py",
             "test_main_sqlite.py",
             "test_routing.py",
             "test_source_analytics.py",
