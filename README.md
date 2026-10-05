@@ -21,14 +21,14 @@ The product goal is a real-time job feed, not a historical job archive:
 - **Market/source as metadata:** Egypt/Saudi/Remote and the source are shown in the message instead of creating duplicate topic posts.
 - **Evidence-based Saudi eligibility:** explicit Saudi-only/open-to-non-Saudi text is extracted from available job descriptions; silence stays `NOT_SPECIFIED`.
 - **Telegram backpressure:** rate limiting, `retry_after`, bounded transient retries, and ambiguous-timeout protection.
-- **Runtime:** GitHub Actions is the **current active production runtime** with a requested `*/15 * * * *` schedule. GitHub cron is best-effort and has shown delayed runs in practice. VPS/systemd support is prepared in the repository as an optional future runtime, but it is **not active** unless an intentional cutover is performed with `VPS_PRODUCTION=true`.
+- **Runtime:** GitHub Actions is the **current active production runtime** with a requested `7,22,37,52 * * * *` schedule. GitHub cron is best-effort and has shown delayed runs in practice. VPS/systemd support is prepared in the repository as an optional future runtime, but it is **not active** unless an intentional cutover is performed with `VPS_PRODUCTION=true`.
 
 
 ## Current Production Status
 
 The current live deployment intentionally stays on **GitHub Actions + the `data` branch SQLite snapshot**.
 
-- Workflow schedule requested from GitHub: `*/15 * * * *` (`:00`, `:15`, `:30`, `:45`).
+- Workflow schedule requested from GitHub: `7,22,37,52 * * * *` (`:07`, `:22`, `:37`, `:52`). This keeps the same 15-minute cadence while avoiding the top-of-hour/minute-quarter peaks.
 - GitHub scheduled execution is **best-effort**, so an actual run can start later than the requested 15-minute cadence.
 - `VPS_PRODUCTION` should remain unset/`false` while GitHub owns production. The VPS files added in Update 19 are standby deployment tooling only.
 - LinkedIn is the active send-capable production fetcher. WUZZUF is paused at runtime after repeated `403` responses.
@@ -490,10 +490,10 @@ Workflow:
 Requested schedule:
 
 ```cron
-*/15 * * * *
+7,22,37,52 * * * *
 ```
 
-This means GitHub is asked to start the workflow at `:00`, `:15`, `:30`, and `:45` every hour. **GitHub Actions is the current production runtime.** The workflow has a `concurrency` group with `cancel-in-progress: false`, restores SQLite from the `data` branch, runs `main.py`, and writes the updated database back.
+This means GitHub is asked to start the workflow at `:07`, `:22`, `:37`, and `:52` every hour. The cadence is still exactly 15 minutes, but the offset avoids the busiest top-of-hour and quarter-hour boundaries. **GitHub Actions is the current production runtime.** The workflow has a `concurrency` group with `cancel-in-progress: false`, restores SQLite from the `data` branch, runs `main.py`, and writes the updated database back.
 
 GitHub's scheduled-event timing is best-effort. Production history has shown delays substantially longer than 15 minutes even though the cron expression is correct. Manual `workflow_dispatch` runs are useful for verification and, while `VPS_PRODUCTION` is unset/false, can perform normal production sends when `seed_mode=false`.
 
@@ -647,7 +647,7 @@ python main.py
 ## Operational Notes
 
 - **Current production owner:** GitHub Actions. `VPS_PRODUCTION` should stay unset/false unless a deliberate VPS cutover is being performed.
-- The workflow cron is already `*/15 * * * *`; delayed starts are a GitHub scheduler limitation, not a wrong cron expression.
+- The workflow cron is `7,22,37,52 * * * *`; it still requests a 15-minute cadence but is intentionally offset from top-of-hour/quarter-hour boundaries. Delayed starts can still occur because GitHub scheduling is best-effort.
 - There is currently no automatic long-gap catch-up/backfill mode. Coverage gaps are logged, but a job can be missed if it falls outside a source's later search window.
 - Keep the bot as an admin in the Telegram supergroup.
 - Configure all ten active primary topic secrets before enabling production sends.

@@ -23,8 +23,9 @@ class WorkflowConfigTests(unittest.TestCase):
         self.assertEqual(concurrency.get("group"), "programming-jobs-bot")
         self.assertIs(concurrency.get("cancel-in-progress"), False)
 
-    def test_schedule_is_every_15_minutes_not_every_5(self):
-        self.assertIn("cron: '*/15 * * * *'", self.text)
+    def test_schedule_is_every_15_minutes_with_offset(self):
+        self.assertIn("cron: '7,22,37,52 * * * *'", self.text)
+        self.assertNotIn("cron: '*/15 * * * *'", self.text)
         self.assertNotIn("cron: '*/5 * * * *'", self.text)
 
     def test_restore_uses_sqlite_database_only(self):
