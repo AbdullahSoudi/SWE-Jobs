@@ -99,13 +99,26 @@ class FreshnessEvidenceTests(unittest.TestCase):
         self.assertEqual(result.reason, "recent_observation_after_success")
         self.assertTrue(result.send_eligible)
 
-    def test_uncertain_fallback_is_rejected_after_coverage_gap(self):
+    def test_source_window_result_remains_eligible_after_coverage_gap(self):
         result = evaluate_new_posting(
             parse_relative_publication("", fetched_at=self.now),
             source_was_baselined=True,
             previous_success_at="2026-10-04T13:00:00Z",
             max_age_seconds=3600,
             uncertain_fallback=FALLBACK_SOURCE_WINDOW,
+            reference_time=self.now,
+        )
+        self.assertEqual(result.status, FRESH)
+        self.assertEqual(result.reason, "source_window_current_result")
+        self.assertTrue(result.send_eligible)
+
+    def test_recent_observation_fallback_is_rejected_after_coverage_gap(self):
+        result = evaluate_new_posting(
+            parse_relative_publication("", fetched_at=self.now),
+            source_was_baselined=True,
+            previous_success_at="2026-10-04T13:00:00Z",
+            max_age_seconds=3600,
+            uncertain_fallback=FALLBACK_RECENT_OBSERVATION,
             reference_time=self.now,
         )
         self.assertEqual(result.status, UNCERTAIN)

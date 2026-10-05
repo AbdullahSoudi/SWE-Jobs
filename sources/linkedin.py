@@ -18,7 +18,15 @@ from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from config import LINKEDIN_FRESHNESS_SECONDS
-from freshness import PublicationEvidence, TOO_OLD, freshness_decision, parse_iso_publication, parse_relative_publication
+from freshness import (
+    PRECISION_EXACT,
+    PRECISION_NONE,
+    PublicationEvidence,
+    TOO_OLD,
+    freshness_decision,
+    parse_iso_publication,
+    parse_relative_publication,
+)
 from models import Job
 
 try:  # final project layout
@@ -307,11 +315,24 @@ def _extract_publication_evidence(
     raw_text = _clean(time_match.group("text"))
     attrs = time_match.group("attrs") or ""
     dt_match = DATETIME_ATTR_RE.search(attrs)
+
+    # Prefer a truly exact datetime attribute when LinkedIn provides one. Some
+    # guest cards instead expose only a date in ``datetime`` while the visible
+    # text says e.g. "15 minutes ago". In that case the relative text is much
+    # more precise and must win over the date-only day bucket.
+    attribute_evidence = PublicationEvidence(raw=raw_text)
     if dt_match:
-        exact = parse_iso_publication(dt_match.group("value"), raw_text=raw_text)
-        if exact.precision != "NONE":
-            return exact
-    return parse_relative_publication(raw_text, fetched_at=fetched_at)
+        attribute_evidence = parse_iso_publication(dt_match.group("value"), raw_text=raw_text)
+        if attribute_evidence.precision == PRECISION_EXACT:
+            return attribute_evidence
+
+    relative_evidence = parse_relative_publication(raw_text, fetched_at=fetched_at)
+    if relative_evidence.precision != PRECISION_NONE:
+        return relative_evidence
+
+    if attribute_evidence.precision != PRECISION_NONE:
+        return attribute_evidence
+    return relative_evidence
 
 
 def _card_is_older_than(

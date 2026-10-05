@@ -85,6 +85,7 @@ from db import (
     expire_legacy_backlog_once,
     expire_stale_unsent_jobs,
     get_jobs_for_sending,
+    get_job_freshness_state,
     get_job_primary_source,
     get_job_send_status,
     get_metadata,
@@ -120,6 +121,10 @@ Sender = Callable[[Job, list[str] | None], dict[str, object]]
 Router = Callable[[Job], list[str]]
 Cleanup = Callable[[], None]
 TELEGRAM_BLOCKED_UNTIL_KEY = "telegram_group_blocked_until"
+RECOVERABLE_FRESHNESS_REASONS = {
+    "coverage_gap_too_large",
+    "insufficient_time_evidence",
+}
 
 
 @dataclass(frozen=True)
@@ -386,16 +391,43 @@ def persist_filtered_jobs(
             refreshed += 1
             metrics.refreshed_jobs += 1
 
+            existing_status = get_job_send_status(conn, job_id)
+            existing_freshness, existing_reason = get_job_freshness_state(conn, job_id)
+            primary_source = _source_key(get_job_primary_source(conn, job_id))
+            is_production_source = not _is_shadow_source(source_key, production_source_keys)
+
+            # Recover only jobs that were previously rejected because freshness
+            # evidence was insufficient, then later gain trustworthy fresh proof
+            # from the same production source. Never revive jobs that were truly
+            # too old, exceeded the delivery deadline, were baselined/skipped, or
+            # have any sent/retry/partial delivery state.
+            if (
+                is_production_source
+                and primary_source == source_key
+                and existing_status == "expired"
+                and existing_freshness == UNCERTAIN
+                and existing_reason in RECOVERABLE_FRESHNESS_REASONS
+                and decision.send_eligible
+            ):
+                set_job_freshness_state(conn, job_id, decision.status, decision.reason)
+                set_job_send_status(conn, job_id, "pending")
+                fresh_new += 1
+                metrics.fresh_new_jobs += 1
+                log.info(
+                    "Recovered expired job %s after stronger freshness evidence from %s.",
+                    job_id,
+                    source_key,
+                )
+                continue
+
             # Non-production observations must never poison production discovery.
             # A shadow/discovery-only source may see the opening first and store it
             # as shadow, skipped, or expired. If a *different* production source
             # later sees the same cluster with trustworthy fresh evidence, promote
             # that cluster into the delivery queue. Ambiguous/sent/retry states are
             # deliberately excluded to avoid duplicate Telegram delivery.
-            existing_status = get_job_send_status(conn, job_id)
-            primary_source = _source_key(get_job_primary_source(conn, job_id))
             if (
-                not _is_shadow_source(source_key, production_source_keys)
+                is_production_source
                 and primary_source != source_key
                 and _is_shadow_source(primary_source, production_source_keys)
                 and existing_status in {"shadow", "skipped", "expired"}

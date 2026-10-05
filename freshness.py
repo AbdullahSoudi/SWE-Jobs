@@ -192,8 +192,14 @@ def evaluate_new_posting(
 
     A source's first successful fetch is always a no-send baseline. After that,
     exact/relative timestamp evidence is authoritative. When timestamp evidence
-    is uncertain, selected sources may use a recent successful observation as a
-    conservative fallback. A long coverage gap disables that fallback.
+    is uncertain, selected sources may use one of two explicit fallbacks:
+
+    - SOURCE_WINDOW means the adapter itself queried a bounded current window
+      (for example LinkedIn f_TPR=r3600). The current result set is freshness
+      evidence on its own and does not depend on the previous poll being recent.
+    - RECENT_OBSERVATION means freshness is inferred only from seeing a new item
+      shortly after a prior successful snapshot. A long coverage gap disables
+      that observation-only fallback.
     """
     if max_age_seconds <= 0:
         raise ValueError("max_age_seconds must be greater than zero")
@@ -217,6 +223,17 @@ def evaluate_new_posting(
     if fallback == FALLBACK_NONE:
         return FreshnessGateDecision(UNCERTAIN, "insufficient_time_evidence", False)
 
+    # A true source-window adapter has already constrained this *current* result
+    # set to max_age_seconds at the upstream query boundary. Missing/coarse card
+    # timestamps therefore do not become stale merely because a previous poll
+    # was delayed. The gap can still mean jobs were missed between polls, but it
+    # does not invalidate items returned by the current bounded window.
+    if fallback == FALLBACK_SOURCE_WINDOW:
+        return FreshnessGateDecision(FRESH, "source_window_current_result", True)
+
+    if fallback != FALLBACK_RECENT_OBSERVATION:
+        raise ValueError(f"Unsupported uncertain_fallback: {uncertain_fallback}")
+
     previous = parse_utc_iso(previous_success_at or "")
     if previous is None:
         return FreshnessGateDecision(UNCERTAIN, "no_previous_success", False)
@@ -227,9 +244,4 @@ def evaluate_new_posting(
     if gap_seconds > max_age_seconds:
         return FreshnessGateDecision(UNCERTAIN, "coverage_gap_too_large", False)
 
-    if fallback == FALLBACK_SOURCE_WINDOW:
-        return FreshnessGateDecision(FRESH, "source_window_recent_observation", True)
-    if fallback == FALLBACK_RECENT_OBSERVATION:
-        return FreshnessGateDecision(FRESH, "recent_observation_after_success", True)
-
-    raise ValueError(f"Unsupported uncertain_fallback: {uncertain_fallback}")
+    return FreshnessGateDecision(FRESH, "recent_observation_after_success", True)

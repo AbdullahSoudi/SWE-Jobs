@@ -216,6 +216,27 @@ class LinkedInPublicationEvidenceTests(unittest.TestCase):
         self.assertEqual(jobs[0].published_precision, "EXACT")
         self.assertEqual(jobs[0].time_semantics, "POSTED")
 
+    def test_relative_text_beats_date_only_datetime_attribute(self):
+        from datetime import UTC, datetime
+
+        html = """
+        <li><a href="https://www.linkedin.com/jobs/view/backend-at-x-7777777778"></a>
+        <h3 class="base-search-card__title">Backend Developer</h3>
+        <h4 class="base-search-card__subtitle">X</h4>
+        <span class="job-search-card__location">Cairo, Egypt</span>
+        <time datetime="2026-10-05">15 minutes ago</time></li>
+        """
+        jobs = linkedin.parse_linkedin_html(
+            html,
+            {"location": "Egypt"},
+            fetched_at=datetime(2026, 10, 5, 15, 0, tzinfo=UTC),
+        )
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].published_at_raw, "15 minutes ago")
+        self.assertEqual(jobs[0].published_at_earliest, "2026-10-05T14:44:00Z")
+        self.assertEqual(jobs[0].published_at_latest, "2026-10-05T14:45:00Z")
+        self.assertEqual(jobs[0].published_precision, "MINUTE")
+
     def test_relative_hour_keeps_uncertainty_interval(self):
         from datetime import UTC, datetime
 

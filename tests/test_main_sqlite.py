@@ -661,6 +661,141 @@ class MainSqliteFlowTests(unittest.TestCase):
                 self.assertEqual(row["send_status"], "expired")
                 self.assertEqual(row["freshness_reason"], "coverage_gap_too_large")
 
+    def test_same_production_source_can_recover_expired_uncertain_job_with_fresh_proof(self):
+        first = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://wuzzuf.net/jobs/p/recover-after-gap",
+            source="wuzzuf",
+            tags=["Python"],
+        )
+        fresh_evidence = parse_relative_publication("5 minutes ago", fetched_at=self.now + timedelta(minutes=15))
+        second = Job(
+            title=first.title,
+            company=first.company,
+            location=first.location,
+            url=first.url,
+            source=first.source,
+            tags=list(first.tags),
+            published_at_raw=fresh_evidence.raw,
+            published_at_earliest=fresh_evidence.earliest,
+            published_at_latest=fresh_evidence.latest,
+            published_at_est=fresh_evidence.estimate,
+            published_precision=fresh_evidence.precision,
+            time_semantics=fresh_evidence.semantics,
+        )
+        sent = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf", minutes_ago=90)
+
+            first_summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [first])],
+                sender=lambda job_obj, topics: {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(first_summary.uncertain_new_jobs, 1)
+            self.assertEqual(first_summary.topic_send_successes, 0)
+
+            second_summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [second])],
+                sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now + timedelta(minutes=15),
+            )
+            self.assertEqual(second_summary.refreshed_jobs, 1)
+            self.assertEqual(second_summary.fresh_new_jobs, 1)
+            self.assertEqual(second_summary.topic_send_successes, 1)
+            self.assertEqual(sent, ["Backend Developer"])
+
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status, freshness_status, freshness_reason FROM jobs WHERE url = ?",
+                    (first.url,),
+                ).fetchone()
+                self.assertEqual(row["send_status"], "sent")
+                self.assertEqual(row["freshness_status"], "FRESH")
+                self.assertEqual(row["freshness_reason"], "publication_time_fresh")
+
+    def test_truly_old_expired_job_is_not_reactivated_by_later_refresh(self):
+        old_evidence = parse_relative_publication("2 hours ago", fetched_at=self.now)
+        old_job = Job(
+            title="Backend Developer",
+            company="Acme",
+            location="Cairo, Egypt",
+            url="https://wuzzuf.net/jobs/p/do-not-revive-old",
+            source="wuzzuf",
+            tags=["Python"],
+            published_at_raw=old_evidence.raw,
+            published_at_earliest=old_evidence.earliest,
+            published_at_latest=old_evidence.latest,
+            published_at_est=old_evidence.estimate,
+            published_precision=old_evidence.precision,
+            time_semantics=old_evidence.semantics,
+        )
+        fresh_evidence = parse_relative_publication("5 minutes ago", fetched_at=self.now + timedelta(minutes=15))
+        refreshed_job = Job(
+            title=old_job.title,
+            company=old_job.company,
+            location=old_job.location,
+            url=old_job.url,
+            source=old_job.source,
+            tags=list(old_job.tags),
+            published_at_raw=fresh_evidence.raw,
+            published_at_earliest=fresh_evidence.earliest,
+            published_at_latest=fresh_evidence.latest,
+            published_at_est=fresh_evidence.estimate,
+            published_precision=fresh_evidence.precision,
+            time_semantics=fresh_evidence.semantics,
+        )
+        sent = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self.make_db_path(tmp)
+            self.prime_source(db_path, "wuzzuf")
+            first_summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [old_job])],
+                sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now,
+            )
+            self.assertEqual(first_summary.expired_new_jobs, 1)
+
+            second_summary = main.run_bot(
+                db_path=db_path,
+                fetchers=[("WUZZUF", lambda: [refreshed_job])],
+                sender=lambda job_obj, topics: sent.append(job_obj.title) or {topic: True for topic in topics},
+                router=lambda job_obj: ["backend"],
+                cleanup_func=lambda: None,
+                seed_mode=False,
+                reference_time=self.now + timedelta(minutes=15),
+            )
+            self.assertEqual(second_summary.refreshed_jobs, 1)
+            self.assertEqual(second_summary.fresh_new_jobs, 0)
+            self.assertEqual(second_summary.topic_send_successes, 0)
+            self.assertEqual(sent, [])
+
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT send_status, freshness_status, freshness_reason FROM jobs WHERE url = ?",
+                    (old_job.url,),
+                ).fetchone()
+                self.assertEqual(row["send_status"], "expired")
+                self.assertEqual(row["freshness_status"], "TOO_OLD")
+                self.assertEqual(row["freshness_reason"], "publication_time_too_old")
+
     def test_unclassified_non_linkedin_job_is_still_filtered_out(self):
         job = Job(
             title="People Operations Coordinator",

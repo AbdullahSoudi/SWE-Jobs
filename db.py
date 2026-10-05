@@ -1454,6 +1454,17 @@ def get_job_send_status(conn: sqlite3.Connection, job_id: int) -> str:
     return str(row["send_status"]) if row else ""
 
 
+def get_job_freshness_state(conn: sqlite3.Connection, job_id: int) -> tuple[str, str]:
+    """Return the persisted freshness status and reason for one job."""
+    row = conn.execute(
+        "SELECT freshness_status, freshness_reason FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return "", ""
+    return str(row["freshness_status"] or ""), str(row["freshness_reason"] or "")
+
+
 def set_job_primary_source(
     conn: sqlite3.Connection, job_id: int, source: str, source_job_id: str = ""
 ) -> None:
