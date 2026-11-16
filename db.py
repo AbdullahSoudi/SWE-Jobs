@@ -24,7 +24,7 @@ from models import Job
 from dedup import find_cross_source_match, source_trust
 
 DB_FILE = os.getenv("JOBS_DB_PATH", "jobs.db")
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 LEGACY_BACKLOG_MIGRATION_KEY = "legacy_backlog_expiry_v1_applied_at"
 
 _TRACKING_QUERY_PREFIXES = (
@@ -544,6 +544,10 @@ def _migrate_schema(conn: sqlite3.Connection, previous_version: int) -> None:
         "source_run_history",
         "health_status TEXT NOT NULL DEFAULT 'UNKNOWN'",
     )
+    # NULL means the legacy adapter/run did not measure page completeness.
+    for counter in ("pages_attempted", "pages_succeeded", "pages_failed"):
+        _ensure_column(conn, "source_runs", f"last_{counter} INTEGER")
+        _ensure_column(conn, "source_run_history", f"{counter} INTEGER")
 
     # Only schema-v1 databases have legacy successful sources that predate
     # explicit baselining. Do not auto-baseline sources created after v2.
@@ -1295,6 +1299,14 @@ def recover_stale_sending_deliveries(
     return int(cur.rowcount)
 
 
+def retry_timestamp(received_at: datetime, delay_seconds: int) -> str:
+    """Round up to stored second precision so cooldowns never end early."""
+    deadline = received_at + timedelta(seconds=delay_seconds)
+    if deadline.microsecond:
+        deadline += timedelta(seconds=1)
+    return _utc_iso(deadline)
+
+
 def record_delivery_result(
     conn: sqlite3.Connection,
     job_id: int,
@@ -1332,17 +1344,21 @@ def record_delivery_result(
         status = "retry_wait"
         sent_at = None
         wait_seconds = max(1, int(retry_after_s or 60))
-        next_attempt_at = _utc_iso(now + timedelta(seconds=wait_seconds))
+        next_attempt_at = retry_timestamp(now, wait_seconds)
     elif normalized == "RETRYABLE":
         status = "retry_wait"
         sent_at = None
-        next_attempt_at = _utc_iso(now + timedelta(seconds=60))
+        next_attempt_at = retry_timestamp(now, 60)
     elif normalized == "UNKNOWN":
         status = "unknown"
         sent_at = None
         next_attempt_at = None
     elif normalized == "CONFIG_ERROR":
         status = "config_error"
+        sent_at = None
+        next_attempt_at = None
+    elif normalized == "EXPIRED":
+        status = "expired"
         sent_at = None
         next_attempt_at = None
     else:
@@ -1562,6 +1578,9 @@ def update_source_run(
     poll_interval_minutes: int = 15,
     next_poll_at: Optional[str] = None,
     health_status: str = "UNKNOWN",
+    pages_attempted: int | None = None,
+    pages_succeeded: int | None = None,
+    pages_failed: int | None = None,
 ) -> None:
     """Record source health and scheduling state without implicit baselining."""
     ts = now_utc()
@@ -1575,7 +1594,7 @@ def update_source_run(
 
     poll_interval = max(15, int(poll_interval_minutes or 15))
     health = (health_status or "UNKNOWN").upper()
-    last_nonempty = run_at if is_ok and int(raw_count or 0) > 0 else None
+    last_nonempty = run_at if status in {"ok", "partial"} and int(raw_count or 0) > 0 else None
 
     conn.execute(
         """
@@ -1584,9 +1603,10 @@ def update_source_run(
             consecutive_failures, consecutive_empty_runs, shadow_mode,
             last_raw_count, last_filtered_count, last_inserted_count,
             last_fresh_count, last_shadow_eligible_count, last_duration_ms,
-            poll_interval_minutes, next_poll_at, health_status, last_nonempty_at, updated_at
+            poll_interval_minutes, next_poll_at, health_status, last_nonempty_at, updated_at,
+            last_pages_attempted, last_pages_succeeded, last_pages_failed
         )
-        VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source) DO UPDATE SET
             last_run_at = excluded.last_run_at,
             last_success_at = CASE
@@ -1615,6 +1635,9 @@ def update_source_run(
             next_poll_at = excluded.next_poll_at,
             health_status = excluded.health_status,
             last_nonempty_at = COALESCE(excluded.last_nonempty_at, source_runs.last_nonempty_at),
+            last_pages_attempted = excluded.last_pages_attempted,
+            last_pages_succeeded = excluded.last_pages_succeeded,
+            last_pages_failed = excluded.last_pages_failed,
             updated_at = excluded.updated_at
         """,
         (
@@ -1624,6 +1647,7 @@ def update_source_run(
             max(0, int(inserted_count)), max(0, int(fresh_count)),
             max(0, int(shadow_eligible_count)), max(0, int(duration_ms)),
             poll_interval, next_poll_at, health, last_nonempty, ts,
+            pages_attempted, pages_succeeded, pages_failed,
         ),
     )
 
@@ -1713,6 +1737,9 @@ def record_source_run_history(
     coverage_gap: bool = False,
     shadow_mode: bool = True,
     health_status: str = "UNKNOWN",
+    pages_attempted: int | None = None,
+    pages_succeeded: int | None = None,
+    pages_failed: int | None = None,
 ) -> int:
     """Append immutable per-run source metrics for trend/health analysis."""
     cur = conn.execute(
@@ -1721,8 +1748,9 @@ def record_source_run_history(
             source, run_at, status, error, duration_ms, raw_count,
             filtered_count, inserted_count, refreshed_count, fresh_count,
             expired_count, uncertain_count, baseline_skipped_count,
-            shadow_eligible_count, coverage_gap, shadow_mode, health_status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            shadow_eligible_count, coverage_gap, shadow_mode, health_status, created_at,
+            pages_attempted, pages_succeeded, pages_failed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source, run_at, status, error or "", max(0, int(duration_ms)),
@@ -1732,6 +1760,7 @@ def record_source_run_history(
             max(0, int(uncertain_count)), max(0, int(baseline_skipped_count)),
             max(0, int(shadow_eligible_count)), 1 if coverage_gap else 0,
             1 if shadow_mode else 0, (health_status or "UNKNOWN").upper(), now_utc(),
+            pages_attempted, pages_succeeded, pages_failed,
         ),
     )
     return int(cur.lastrowid)

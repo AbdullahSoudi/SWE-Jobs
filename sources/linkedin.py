@@ -14,6 +14,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -28,6 +29,8 @@ from freshness import (
     parse_relative_publication,
 )
 from models import Job
+import requests
+from sources.collection import CollectionResult, is_access_challenge, has_empty_results_notice
 
 try:  # final project layout
     from sources.http_utils import get_text
@@ -138,7 +141,7 @@ def fetch_linkedin(
     max_pages_per_search: int = DEFAULT_MAX_PAGES_PER_SEARCH,
     request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
     http_getter: Callable[..., str | None] | None = None,
-) -> list[Job]:
+) -> CollectionResult:
     """Fetch a limited set of public LinkedIn guest job-search result cards.
 
     Args:
@@ -154,7 +157,8 @@ def fetch_linkedin(
 
     getter = http_getter or get_text
     selected_searches = searches or LINKEDIN_SEARCHES
-    jobs: list[Job] = []
+    result = CollectionResult()
+    jobs = result.jobs
     seen_urls: set[str] = set()
     pages_requested = 0
 
@@ -164,14 +168,31 @@ def fetch_linkedin(
             params["start"] = str(page_idx * PAGE_SIZE)
             pages_requested += 1
 
-            page_html = getter(SEARCH_URL, params=params, headers=_headers())
-            if not page_html:
-                log.warning("LinkedIn: no response for %s", _safe_params_for_log(params))
-                if request_delay:
-                    time.sleep(request_delay)
-                continue
-
-            parsed = parse_linkedin_html(page_html, search_params=params, max_age_seconds=DEFAULT_FRESHNESS_SECONDS)
+            error = ""
+            parsed = []
+            try:
+                page_html = getter(SEARCH_URL, params=params, headers=_headers())
+                if page_html is None:
+                    error = "transport_failure"
+                elif not isinstance(page_html, str):
+                    error = "unexpected_response_type"
+                elif is_access_challenge(page_html):
+                    error = "access_challenge"
+                else:
+                    cards = _extract_cards(page_html)
+                    if cards:
+                        if not all(_clean(_match_group(TITLE_RE, card, "title"))
+                                   and _match_group(URL_RE, card, "url") for card in cards):
+                            error = "malformed_job_cards"
+                        parsed = parse_linkedin_html(page_html, search_params=params, max_age_seconds=DEFAULT_FRESHNESS_SECONDS)
+                    elif (page_html.strip() and not has_empty_results_notice(page_html)
+                          and not re.fullmatch(r'\s*<ul\b[^>]*>\s*</ul>\s*', page_html, re.I)):
+                        error = "unrecognized_results_html"
+                    # The guest search endpoint's empty fragment is a valid
+                    # empty page; None specifically means transport failure.
+            except requests.RequestException as exc:
+                error = f"transport_failure:{type(exc).__name__}"
+            result.record_page(error)
             for job in parsed:
                 normalized_url = canonicalize_linkedin_url(job.url)
                 if normalized_url in seen_urls:
@@ -182,8 +203,9 @@ def fetch_linkedin(
             if request_delay:
                 time.sleep(request_delay)
 
-    log.info("LinkedIn: fetched %s jobs from %s page requests.", len(jobs), pages_requested)
-    return jobs
+    log.info("LinkedIn: fetched %s jobs from %s pages; status=%s succeeded=%s failed=%s",
+             len(jobs), pages_requested, result.status, result.pages_succeeded, result.pages_failed)
+    return result
 
 
 def parse_linkedin_html(
@@ -209,7 +231,8 @@ def parse_linkedin_html(
     seen_urls: set[str] = set()
 
     for card in cards:
-        if _is_closed_or_inactive_card(card):
+        labels = _visible_card_labels(card)
+        if _is_closed_or_inactive_card(card, labels=labels):
             continue
 
         publication = _extract_publication_evidence(card, fetched)
@@ -229,9 +252,26 @@ def parse_linkedin_html(
         seen_urls.add(url)
 
         company = _clean(_match_group(COMPANY_RE, card, "company"))
-        location = _clean(_match_group(LOCATION_RE, card, "location")) or params.get("location", "Remote")
-        is_remote = params.get("f_WT") == "2" or _contains_remote_signal(f"{title} {location} {card}")
-        job_type = _extract_job_type(card)
+        location = _clean(_match_group(LOCATION_RE, card, "location")) or params.get("location", "")
+        remote_evidence = (params.get("f_WT") == "2"
+                           or _contains_remote_signal(f"{title} {location}")
+                           or bool(labels.intersection(REMOTE_MARKERS)))
+        # Explicit attendance requirements override a broad remote search or
+        # contradictory title. Keep the conflict visible to operators.
+        attendance = next((mode for mode in ("On-site", "Hybrid")
+                           if mode.lower() in labels
+                           or re.search(r"(?<!\w)" + mode.lower().replace("-", "[- ]?") + r"(?!\w)",
+                                        location.lower())), "")
+        if attendance and remote_evidence:
+            log.warning("LinkedIn: conflicting workplace evidence for job %s; using %s",
+                        extract_linkedin_job_id(url), attendance)
+        is_remote = bool(remote_evidence and not attendance)
+        job_type = _extract_job_type(card, labels=labels)
+        if attendance:
+            modes = [part for part in job_type.split(" | ") if part and part != "Remote"]
+            if attendance not in modes:
+                modes.append(attendance)
+            job_type = " | ".join(modes)
         tags = _extract_tags(card, job_type=job_type, is_remote=is_remote)
 
         job = Job(
@@ -274,12 +314,60 @@ def _match_group(pattern: re.Pattern[str], text: str, group: str) -> str:
     return match.group(group) if match else ""
 
 
-def _extract_job_type(card_html: str) -> str:
-    text = _clean(card_html)
-    found: list[str] = []
-    for pattern in TAG_TEXT_PATTERNS:
-        if pattern.lower() in text.lower() and pattern not in found:
-            found.append(pattern)
+class _CardLabels(HTMLParser):
+    """Read complete visible labels outside company/title/location/link fields.
+
+    Collect nested label text too, so a badge containing <strong> still works.
+    Attribute values, scripts and hidden nodes never constitute job evidence.
+    """
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, list[str], bool]] = []
+        self.labels: set[str] = set()
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                   "link", "meta", "param", "source", "track", "wbr"}:
+            return
+        values = dict(attrs)
+        classes = set((values.get("class") or "").split())
+        style = re.sub(r"\s+", "", values.get("style") or "").lower()
+        blocked = (bool(self.stack and self.stack[-1][2])
+                   or tag in {"a", "script", "style", "template", "time"}
+                   or "hidden" in values or (values.get("aria-hidden") or "").lower() == "true"
+                   or "display:none" in style or "visibility:hidden" in style
+                   or bool(classes.intersection({"base-search-card__title", "base-search-card__subtitle",
+                                                 "job-search-card__location", "hidden", "sr-only"})))
+        self.stack.append((tag, [], blocked))
+
+    def handle_data(self, data):
+        if self.stack and not self.stack[-1][2]:
+            for _, parts, blocked in self.stack:
+                if not blocked:
+                    parts.append(data)
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                for _, parts, blocked in self.stack[index:]:
+                    if not blocked:
+                        text = " ".join(" ".join(parts).split()).lower().strip(" .!:")
+                        if text:
+                            self.labels.add(text)
+                del self.stack[index:]
+                break
+
+
+def _visible_card_labels(card_html: str) -> set[str]:
+    parser = _CardLabels()
+    parser.feed(card_html)
+    parser.close()
+    return parser.labels
+
+
+def _extract_job_type(card_html: str, *, labels: set[str] | None = None) -> str:
+    labels = _visible_card_labels(card_html) if labels is None else labels
+    found = [pattern for pattern in TAG_TEXT_PATTERNS if pattern.lower() in labels]
     return " | ".join(found[:3])
 
 
@@ -294,13 +382,14 @@ def _extract_tags(card_html: str, job_type: str = "", is_remote: bool = False) -
 
 def _contains_remote_signal(text: str) -> bool:
     low = text.lower()
-    return any(marker in low for marker in REMOTE_MARKERS)
+    return any(re.search(r"(?<!\w)" + re.escape(marker) + r"(?!\w)", low)
+               for marker in REMOTE_MARKERS)
 
 
 
-def _is_closed_or_inactive_card(card_html: str) -> bool:
-    text = _clean(card_html).lower()
-    return any(marker in text for marker in CLOSED_JOB_MARKERS)
+def _is_closed_or_inactive_card(card_html: str, *, labels: set[str] | None = None) -> bool:
+    labels = _visible_card_labels(card_html) if labels is None else labels
+    return bool(labels.intersection(CLOSED_JOB_MARKERS))
 
 
 def _extract_publication_evidence(

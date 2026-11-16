@@ -275,11 +275,25 @@ CHANNELS = {'general': {'thread_env': 'TOPIC_GENERAL', 'name': '💻 Other Tech'
                       'crm developer',
                       'crm consultant']}}
 
+CHANNELS["design"] = {
+    "thread_env": "TOPIC_DESIGN",
+    "name": "🎨 UI/UX & Graphic Designer Jobs",
+    "keywords": [
+        "ui/ux designer", "ui ux design", "ux designer", "ui designer",
+        "user experience designer", "user interface designer", "ux researcher",
+        "user experience researcher", "interaction designer", "product designer",
+        "graphic designer", "graphic design", "visual designer", "brand designer",
+        "brand identity designer", "web designer", "motion designer",
+        "motion graphic designer", "motion graphics designer",
+    ],
+}
+
 # First matching category wins.  Internships/Fresh is intentionally first so
 # an entry-level job is posted once there rather than duplicated into its role
 # topic.  Generic tech jobs fall back to ``general``.
 PRIMARY_TOPIC_ORDER = (
     "internships",
+    "design",
     "backend",
     "frontend",
     "mobile",
@@ -305,31 +319,8 @@ def get_topic_thread_id(channel_key: str) -> int | None:
 # Jobs in these countries pass regardless of remote/onsite
 ALLOWED_ONSITE_COUNTRIES = {"egypt", "مصر", "saudi arabia", "saudi", "ksa", "السعودية"}
 
-# Patterns that indicate a location is in Egypt
-EGYPT_PATTERNS = {
-    "egypt", "مصر", "cairo", "القاهرة", "alexandria", "الإسكندرية",
-    "giza", "الجيزة", "minya", "المنيا", "mansoura", "المنصورة",
-    "tanta", "طنطا", "aswan", "أسوان", "luxor", "الأقصر",
-    "port said", "بورسعيد", "suez", "السويس", "ismailia", "الإسماعيلية",
-    "fayoum", "الفيوم", "zagazig", "الزقازيق", "damanhur", "دمنهور",
-    "beni suef", "بني سويف", "sohag", "سوهاج", "asyut", "أسيوط",
-    "qena", "قنا", "hurghada", "الغردقة", "sharm el sheikh",
-    "new cairo", "6th of october", "6 october", "smart village",
-    "new capital", "العاصمة الإدارية", "nasr city", "مدينة نصر",
-    "maadi", "المعادي", "heliopolis", "مصر الجديدة", "dokki", "الدقي",
-    "mohandessin", "المهندسين",
-}
-
-# Patterns that indicate a location is in Saudi Arabia
-SAUDI_PATTERNS = {
-    "saudi arabia", "saudi", "ksa", "السعودية", "المملكة العربية السعودية",
-    "riyadh", "الرياض", "jeddah", "جدة", "mecca", "مكة",
-    "medina", "المدينة", "dammam", "الدمام", "khobar", "الخبر",
-    "dhahran", "الظهران", "tabuk", "تبوك", "abha", "أبها",
-    "taif", "الطائف", "jubail", "الجبيل", "yanbu", "ينبع",
-    "neom", "نيوم", "qassim", "القصيم", "hail", "حائل",
-    "jazan", "جازان", "najran", "نجران", "al kharj", "الخرج",
-}
+# Compatibility aliases; active consumers use the country-aware resolver.
+from locations import EGYPT_PATTERNS, SAUDI_PATTERNS
 
 # Patterns that indicate a job is remote
 REMOTE_PATTERNS = {

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import config
 from source_trust import is_official_source
+from locations import normalize_location
 
 
 def _flatten_tags(tags) -> str:
@@ -117,20 +118,24 @@ def _text_matches_any(text: str, patterns) -> bool:
 
 def _is_in_egypt(location: str) -> bool:
     """Check if location indicates Egypt."""
-    loc = location.lower().strip()
-    return any(p in loc for p in config.EGYPT_PATTERNS)
+    return normalize_location(location).country_code == "EG"
 
 
 def _is_in_saudi(location: str) -> bool:
     """Check if location indicates Saudi Arabia."""
-    loc = location.lower().strip()
-    return any(p in loc for p in config.SAUDI_PATTERNS)
+    return normalize_location(location).country_code == "SA"
 
 
 def _is_remote(job: Job) -> bool:
     """Check if job is remote based on multiple signals."""
     if job.is_remote:
         return True
+    if job.source in {"linkedin", "linkedin_saudi_v2"} and any(
+        part.strip().lower() in {"on-site", "hybrid"} for part in job.job_type.split("|")
+    ):
+        # Preserve the parser's explicit attendance decision when a remote
+        # title/search conflicted with a visible workplace label.
+        return False
     combined = f"{job.title} {job.location} {job.job_type} {_flatten_tags(job.tags)}".lower()
     return any(p in combined for p in config.REMOTE_PATTERNS)
 

@@ -45,19 +45,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore SQLite database from data branch
-        run: |
-          # Fetch only the current data-branch tip. The data branch contains a
-          # binary SQLite snapshot on every commit, so fetching its full history
-          # becomes very expensive over time.
-          git fetch --depth=1 origin data || true
-
-          if git checkout origin/data -- jobs.db 2>/dev/null; then
-            echo "jobs.db restored: $(wc -c < jobs.db) bytes"
-          else
-            echo "jobs.db not found yet; db.py will create it during the first run."
-          fi
+        id: restore
+        run: python -m ops.sqlite_snapshot restore
 
       - name: Run bot
+        id: bot
+        if: success() && steps.restore.outcome == 'success'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
@@ -69,6 +62,7 @@ jobs:
           TOPIC_GENERAL: ${{ secrets.TOPIC_GENERAL }}
           TOPIC_BACKEND: ${{ secrets.TOPIC_BACKEND }}
           TOPIC_FRONTEND: ${{ secrets.TOPIC_FRONTEND }}
+          TOPIC_DESIGN: ${{ secrets.TOPIC_DESIGN }}
           TOPIC_MOBILE: ${{ secrets.TOPIC_MOBILE }}
           TOPIC_DEVOPS: ${{ secrets.TOPIC_DEVOPS }}
           TOPIC_QA: ${{ secrets.TOPIC_QA }}
@@ -79,12 +73,11 @@ jobs:
         run: python main.py
 
       - name: Save SQLite database to data branch
-        if: always()
+        if: always() && steps.restore.outcome == 'success' && (steps.bot.outcome == 'success' || steps.bot.outcome == 'failure')
         run: |
-          if [ ! -f jobs.db ]; then
-            echo "jobs.db was not created; nothing to persist."
-            exit 0
-          fi
+          # Validate while still on the code branch; never publish missing,
+          # corrupt, or unrelated state, even after a failed bot step.
+          python -m ops.sqlite_snapshot verify
 
           mkdir -p /tmp/job-bot-data
           cp jobs.db /tmp/job-bot-data/jobs.db
@@ -94,7 +87,7 @@ jobs:
 
           # The restore step already fetched origin/data shallowly. Reuse that
           # exact tip instead of downloading the growing binary history again.
-          git checkout -B data origin/data 2>/dev/null || git checkout --orphan data
+          git checkout -B data origin/data
 
           # Remove the old JSON persistence file if it exists from previous versions.
           git rm -f seen_jobs.json 2>/dev/null || true

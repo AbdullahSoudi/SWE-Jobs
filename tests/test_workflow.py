@@ -30,9 +30,16 @@ class WorkflowConfigTests(unittest.TestCase):
 
     def test_restore_uses_sqlite_database_only(self):
         self.assertIn("Restore SQLite database from data branch", self.text)
-        self.assertIn("git fetch --depth=1 origin data", self.text)
-        self.assertRegex(self.text, r"git checkout origin/data -- jobs\.db")
-        self.assertIn("db.py will create it during the first run", self.text)
+        self.assertIn("python -m ops.sqlite_snapshot restore", self.text)
+        steps = self.data['jobs']['run-bot']['steps']
+        restore = next(step for step in steps if step.get('id') == 'restore')
+        bot = next(step for step in steps if step.get('id') == 'bot')
+        save = next(step for step in steps if step['name'].startswith('Save SQLite'))
+        self.assertIn("steps.restore.outcome == 'success'", bot['if'])
+        self.assertIn("steps.restore.outcome == 'success'", save['if'])
+        self.assertIn("steps.bot.outcome == 'failure'", save['if'])
+        self.assertNotIn('--orphan', save['run'])
+        self.assertTrue(save['run'].index('ops.sqlite_snapshot verify') < save['run'].index('git checkout'))
         self.assertNotRegex(self.text, r"git checkout origin/data -- seen_jobs\.json")
 
     def test_save_persists_sqlite_database_only(self):
@@ -59,6 +66,7 @@ class WorkflowConfigTests(unittest.TestCase):
             "TOPIC_GENERAL",
             "TOPIC_BACKEND",
             "TOPIC_FRONTEND",
+            "TOPIC_DESIGN",
             "TOPIC_MOBILE",
             "TOPIC_DEVOPS",
             "TOPIC_QA",
@@ -80,7 +88,6 @@ class WorkflowConfigTests(unittest.TestCase):
             "TOPIC_MARKETING",
             "TOPIC_DATA_ENG",
             "TOPIC_APP_SUPPORT",
-            "TOPIC_DESIGN",
             "TOPIC_BUSINESS",
         ]
         for env_name in retired_envs:

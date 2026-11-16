@@ -14,7 +14,7 @@ import re
 from typing import Iterable
 
 from classifier import normalize_text
-from locations import normalize_saudi_location
+from locations import normalize_location
 from models import Job
 from source_trust import trust_score
 
@@ -155,22 +155,22 @@ def title_similarity(title_a: str, title_b: str) -> float:
 
 def location_key(value: str) -> str:
     """Normalize Saudi locations while keeping non-Saudi matching strict."""
-    sa = normalize_saudi_location(value)
-    if sa.is_saudi:
+    sa = normalize_location(value)
+    if sa.country_code == "SA" and not sa.ambiguous:
         return f"SA:{sa.city_code or 'COUNTRY'}"
     return normalize_text(value)
 
 
 def locations_compatible(a: str, b: str) -> bool:
-    sa = normalize_saudi_location(a)
-    sb = normalize_saudi_location(b)
-    if sa.is_saudi or sb.is_saudi:
-        if not (sa.is_saudi and sb.is_saudi):
-            return False
+    sa = normalize_location(a)
+    sb = normalize_location(b)
+    if sa.ambiguous or sb.ambiguous or sa.country_code != sb.country_code:
+        return False
+    if sa.country_code == "SA":
         if sa.city_code and sb.city_code:
             return sa.city_code == sb.city_code
         return True
-    return normalize_text(a) == normalize_text(b)
+    return bool(normalize_text(a)) and normalize_text(a) == normalize_text(b)
 
 
 def _parse_iso(value: str) -> datetime | None:

@@ -8,6 +8,26 @@ VENV_DIR="${VENV_DIR:-$APP_ROOT/venv}"
 STATE_DIR="${STATE_DIR:-/var/lib/swe-jobs}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/swe-jobs}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/swe-jobs}"
+
+# The shipped units and environment template use a fixed layout. Reject
+# overrides before inspecting the host or creating users, paths or files.
+for setting in \
+  "APP_USER=swejobs" \
+  "APP_ROOT=/opt/swe-jobs" \
+  "APP_DIR=/opt/swe-jobs/current" \
+  "VENV_DIR=/opt/swe-jobs/venv" \
+  "STATE_DIR=/var/lib/swe-jobs" \
+  "BACKUP_DIR=/var/backups/swe-jobs" \
+  "CONFIG_DIR=/etc/swe-jobs"; do
+  name="${setting%%=*}"
+  expected="${setting#*=}"
+  if [[ "${!name}" != "${expected}" ]]; then
+    echo "Unsupported ${name}: this installer requires ${expected}. Unset ${name} or use the documented default." >&2
+    exit 1
+  fi
+done
+unset setting name expected
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ "${EUID}" -ne 0 ]]; then

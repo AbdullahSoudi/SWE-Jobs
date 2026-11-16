@@ -5,6 +5,7 @@ Runs every cycle to keep the group clean.
 
 import logging
 import requests
+from telegram_errors import transport_error
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID
 
 log = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ def cleanup_join_messages():
             log.info(f"🧹 Cleaned up {deleted} join/leave messages.")
 
     except requests.RequestException as e:
-        log.warning(f"Cleanup failed: {e}")
+        log.warning("Cleanup failed: %s", transport_error(e))
 
 
 def _delete_message(chat_id: str, message_id: int) -> bool:

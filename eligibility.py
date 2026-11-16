@@ -43,7 +43,7 @@ def _normalize_for_match(value: str) -> str:
     text = html_to_text(value).casefold()
     text = _ARABIC_DIACRITICS_RE.sub("", text)
     text = text.replace("ـ", "")
-    for src, dst in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي")):
+    for src, dst in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
         text = text.replace(src, dst)
     text = re.sub(r"[_/\\|-]+", " ", text)
     return _SPACE_RE.sub(" ", text).strip()
@@ -56,8 +56,7 @@ class EligibilityResult:
     rule: str = ""
 
 
-# Explicit-open rules are evaluated first because phrases such as
-# "Saudi or non-Saudi" contain the word Saudi but are clearly inclusive.
+# Match affirmative evidence in both directions; conflicting evidence stays unknown.
 _OPEN_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("saudi_or_non_saudi", re.compile(r"\bsaudi(?:s| nationals?)?\s*(?:or|and)\s*non\s*saudi(?:s)?\b", re.I)),
     ("non_saudi_or_saudi", re.compile(r"\bnon\s*saudi(?:s)?\s*(?:or|and)\s*saudi(?:s| nationals?)?\b", re.I)),
@@ -77,7 +76,7 @@ _SAUDI_ONLY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("saudi_nationals_only", re.compile(r"\bsaudi\s+nationals?\s+only\b", re.I)),
     ("only_saudi_nationals", re.compile(r"\bonly\s+saudi\s+nationals?\b", re.I)),
     ("saudis_only", re.compile(r"\bsaudi(?:s)?\s+only\b", re.I)),
-    ("must_be_saudi", re.compile(r"\bmust\s+be\s+(?:a\s+)?saudi(?:\s+national)?\b", re.I)),
+    ("must_be_saudi", re.compile(r"\bmust\s+be\s+(?:a\s+)?saudi(?:\s+national)?\b(?!\s+(?:market|based|owned))", re.I)),
     ("saudi_nationality_required", re.compile(r"\bsaudi\s+nationality\s+(?:is\s+)?(?:required|mandatory)\b", re.I)),
     ("restricted_to_saudi", re.compile(r"\b(?:restricted|limited)\s+to\s+saudi\s+nationals?\b", re.I)),
     ("saudization", re.compile(r"\bsaudi[sz]ation\b", re.I)),
@@ -85,7 +84,7 @@ _SAUDI_ONLY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("arabic_saudi_only", re.compile(r"للسعودي(?:ين|ات)?\s+فقط")),
     ("arabic_saudi_nationality", re.compile(r"سعودي(?:ه|ة)?\s+الجنسيه")),
     ("arabic_saudi_nationality_required", re.compile(r"الجنسيه\s+السعوديه\s*(?:مطلوبه|مطلوب|شرط|فقط)")),
-    ("arabic_applicant_must_be_saudi", re.compile(r"(?:يشترط|يجب).*?(?:المتقدم|المتقدمه)?.*?سعودي(?:ه|ة)?")),
+    ("arabic_applicant_must_be_saudi", re.compile(r"(?:يشترط|يجب)\s+(?:ان\s+)?(?:يكون|تكون)\s+(?:المتقدم|المتقدمه|المرشح|المرشحه)\s+سعودي(?:ه)?\b")),
     ("arabic_applicant_is_saudi", re.compile(r"ان\s+(?:يكون\s+المتقدم|تكون\s+المتقدمه)\s+سعودي(?:ه|ة)?")),
     ("arabic_tamheer", re.compile(r"تمهير")),
 )
@@ -112,6 +111,33 @@ def _evidence_text(segment: str) -> str:
     return clean[: _MAX_EVIDENCE_CHARS - 1].rstrip() + "…"
 
 
+def _negated_or_conditional(text: str, match: re.Match) -> bool:
+    prefix = re.split(r",|،|\bbut\b|\bhowever\b|ولكن|لكن", text[:match.start()])[-1]
+    if re.search(r"\b(?:not|never|no|without|cannot|can't|isn't|doesn't|don't|if|unless|whether|prefer|preferably|preferred|ideally)\b"
+                 r"|(?:^|\s)(?:لا|ليس|ليست|غير|بدون|عدم|لم|لن|اذا|يفضل|الافضل)(?:\s|$)", prefix):
+        return True
+    return bool(re.match(r"\s*(?:(?:is|are)\s+not\b|not\s+(?:required|mandatory)\b|preferred\b|غير\s+مطلوب|يفضل)",
+                         text[match.end():]))
+
+
+def _applicant_scoped(rule: str, text: str, *, label: bool) -> bool:
+    if label:
+        return True
+    applicant = re.search(r"\b(?:applicants?|candidates?|applications?|apply)\b|المتقدم|المرشح|التقديم", text)
+    # Demographics, customers and company ownership do not describe applicants.
+    if not applicant and re.search(r"\b(?:colleagues|employees|workforce|customers|clients|our staff)\b"
+                                   r"|موظفينا|عملائنا|زملائنا"
+                                   r"|\b(?:company|business|employer)\s+(?:must\s+be|is|are)\b", text):
+        return False
+    if rule in {"tamheer", "arabic_tamheer", "saudization"}:
+        return bool(re.search(r"\b(?:this|the)\s+(?:role|position|vacancy)\b|هذه\s+(?:الوظيفه|الفرصه)", text))
+    if rule in {"all_nationalities", "saudi_or_non_saudi", "non_saudi_or_saudi",
+                "arabic_all_nationalities", "arabic_for_all_nationalities",
+                "arabic_saudi_and_non_saudi", "arabic_saudi_or_non_saudi", "arabic_non_saudi"}:
+        return bool(applicant or re.search(r"\b(?:open|available|welcome|eligible)\b|متاح|الوظيفه|الفرصه", text))
+    return True
+
+
 def classify_eligibility(
     *,
     title: str = "",
@@ -124,19 +150,21 @@ def classify_eligibility(
     Saudi candidates are not treated as Saudi-only.
     """
     tag_values = [str(tag) for tag in (tags or []) if tag is not None]
-    candidates = _segments([title, *tag_values, description])
-
-    for rule, pattern in _OPEN_RULES:
-        for original, normalized in candidates:
-            if pattern.search(normalized):
-                return EligibilityResult(EXPLICITLY_OPEN, _evidence_text(original), rule)
-
-    for rule, pattern in _SAUDI_ONLY_RULES:
-        for original, normalized in candidates:
-            if pattern.search(normalized):
-                return EligibilityResult(SAUDI_ONLY, _evidence_text(original), rule)
-
-    return EligibilityResult(NOT_SPECIFIED)
+    candidates = [(original, normalized, True) for original, normalized in _segments([title, *tag_values])]
+    candidates += [(original, normalized, False) for original, normalized in _segments([description])]
+    evidence: dict[str, EligibilityResult] = {}
+    for value, rules in ((EXPLICITLY_OPEN, _OPEN_RULES), (SAUDI_ONLY, _SAUDI_ONLY_RULES)):
+        for rule, pattern in rules:
+            for original, normalized, label in candidates:
+                for match in pattern.finditer(normalized):
+                    if (_applicant_scoped(rule, normalized, label=label)
+                            and not _negated_or_conditional(normalized, match)):
+                        evidence.setdefault(value, EligibilityResult(value, _evidence_text(original), rule))
+    if len(evidence) > 1:
+        return EligibilityResult(NOT_SPECIFIED,
+                                 _evidence_text(" | ".join(item.evidence for item in evidence.values())),
+                                 "conflicting_evidence")
+    return next(iter(evidence.values()), EligibilityResult(NOT_SPECIFIED))
 
 
 def enrich_job_eligibility(job) -> EligibilityResult:
