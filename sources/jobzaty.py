@@ -19,6 +19,8 @@ from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from models import Job
+import requests
+from sources.collection import CollectionResult, is_access_challenge, has_empty_results_notice
 
 try:  # final project layout
     from sources.http_utils import get_text
@@ -105,7 +107,7 @@ def fetch_jobzaty(
     *,
     max_pages_per_category: int = 1,
     http_getter: Callable[[str], str | None] | None = None,
-) -> list[Job]:
+) -> CollectionResult:
     """Fetch a small, public Saudi tech discovery window from Jobzaty.
 
     ``max_pages_per_category`` defaults to one on purpose.  This is not an
@@ -117,7 +119,8 @@ def fetch_jobzaty(
 
     getter = http_getter or get_text
     feeds = tuple(category_feeds or JOBZATY_CATEGORY_FEEDS)
-    jobs: list[Job] = []
+    result = CollectionResult()
+    jobs = result.jobs
     seen_ids: set[str] = set()
     requested = 0
 
@@ -125,20 +128,39 @@ def fetch_jobzaty(
         for page in range(1, max_pages_per_category + 1):
             url = _with_page(base_url, page)
             requested += 1
-            page_html = getter(url)
-            if not page_html:
-                log.warning("Jobzaty: no response for %s", url)
-                continue
-
-            for job in parse_jobzaty_listing(page_html, page_url=url, category_tag=category_tag):
+            error = ""
+            parsed = []
+            try:
+                page_html = getter(url)
+                if page_html is None:
+                    error = "transport_failure"
+                elif not isinstance(page_html, str):
+                    error = "unexpected_response_type"
+                elif is_access_challenge(page_html):
+                    error = "access_challenge"
+                else:
+                    matches = list(JOB_LINK_RE.finditer(page_html))
+                    if matches:
+                        parsed = parse_jobzaty_listing(page_html, page_url=url, category_tag=category_tag)
+                        if not all(_clean_html(match.group("title"))
+                                   and _source_job_id(urljoin(url, html.unescape(match.group("href"))))
+                                   for match in matches):
+                            error = "malformed_job_cards"
+                    elif not has_empty_results_notice(page_html):
+                        error = "unrecognized_results_html"
+            except requests.RequestException as exc:
+                error = f"transport_failure:{type(exc).__name__}"
+            result.record_page(error)
+            for job in parsed:
                 key = job.source_job_id or job.url.lower().rstrip("/")
                 if key in seen_ids:
                     continue
                 seen_ids.add(key)
                 jobs.append(job)
 
-    log.info("Jobzaty discovery: fetched %s cards from %s page requests.", len(jobs), requested)
-    return jobs
+    log.info("Jobzaty discovery: fetched %s cards from %s pages; status=%s succeeded=%s failed=%s",
+             len(jobs), requested, result.status, result.pages_succeeded, result.pages_failed)
+    return result
 
 
 def parse_jobzaty_listing(page_html: str, *, page_url: str = BASE_URL, category_tag: str = "") -> list[Job]:

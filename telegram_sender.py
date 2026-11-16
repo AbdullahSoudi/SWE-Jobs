@@ -12,13 +12,16 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 import requests
+from telegram_errors import redact_telegram_error, transport_error
+from freshness import ensure_utc, utc_now
 
 from models import Job
 from classifier import classify_job
-from locations import saudi_location_hashtags
+from locations import normalize_location, saudi_location_hashtags
 from eligibility import SAUDI_ONLY, EXPLICITLY_OPEN, NOT_SPECIFIED
 from config import (
     CHANNELS,
@@ -39,6 +42,7 @@ RETRYABLE = "RETRYABLE"
 NON_RETRYABLE = "NON_RETRYABLE"
 CONFIG_ERROR = "CONFIG_ERROR"
 UNKNOWN = "UNKNOWN"
+EXPIRED = "EXPIRED"
 
 
 @dataclass(frozen=True)
@@ -97,17 +101,11 @@ def _match_keywords(text: str, keywords: list[str]) -> bool:
 
 
 def _is_egypt_job(job: Job) -> bool:
-    from config import EGYPT_PATTERNS
-
-    loc = job.location.lower()
-    return any(p in loc for p in EGYPT_PATTERNS)
+    return normalize_location(job.location).country_code == "EG"
 
 
 def _is_saudi_job(job: Job) -> bool:
-    from config import SAUDI_PATTERNS
-
-    loc = job.location.lower()
-    return any(p in loc for p in SAUDI_PATTERNS)
+    return normalize_location(job.location).country_code == "SA"
 
 
 def route_job(job: Job) -> list[str]:
@@ -203,10 +201,12 @@ def _telegram_body(resp: requests.Response) -> dict:
         return {}
 
 
-def _error_result(resp: requests.Response) -> TelegramSendResult:
+def _error_result(resp: requests.Response, bot_token: str = "") -> TelegramSendResult:
     body = _telegram_body(resp)
     error_code = body.get("error_code")
-    description = str(body.get("description") or resp.text or "Telegram request failed")
+    description = redact_telegram_error(
+        str(body.get("description") or resp.text or "Telegram request failed"), bot_token
+    )
     parameters = body.get("parameters") or {}
     retry_after = parameters.get("retry_after")
     try:
@@ -277,6 +277,8 @@ class TelegramClient:
         *,
         allow_plain_fallback: bool = True,
         use_html: bool = True,
+        deadline_at: datetime | None = None,
+        clock: Callable[[], datetime] = utc_now,
     ) -> TelegramSendResult:
         if not self.bot_token or not self.group_id:
             return TelegramSendResult(False, CONFIG_ERROR, "Telegram bot token/group ID is not configured")
@@ -293,16 +295,24 @@ class TelegramClient:
 
         retry_number = 0
         while True:
+            if deadline_at is not None and ensure_utc(clock()) >= ensure_utc(deadline_at):
+                return TelegramSendResult(False, EXPIRED, "send_queue_deadline_exceeded")
             self.limiter.wait()
+            # A limiter wait, inline backoff, or recursive plain-text fallback
+            # must never allow another request once the queue budget is over.
+            if deadline_at is not None and ensure_utc(clock()) >= ensure_utc(deadline_at):
+                return TelegramSendResult(False, EXPIRED, "send_queue_deadline_exceeded")
             try:
                 resp = self.session.post(self.api_url, json=payload, timeout=self.timeout_seconds)
             except requests.ReadTimeout as exc:
                 # Telegram may have accepted the request before the response was lost.
-                return TelegramSendResult(False, UNKNOWN, f"ReadTimeout: {exc}")
-            except (requests.ConnectTimeout, requests.ConnectionError) as exc:
-                result = TelegramSendResult(False, RETRYABLE, f"{type(exc).__name__}: {exc}")
+                return TelegramSendResult(False, UNKNOWN, transport_error(exc))
+            except requests.ConnectTimeout as exc:
+                # ConnectTimeout specifically establishes that no connection was
+                # made. Generic ConnectionError may happen after acceptance.
+                result = TelegramSendResult(False, RETRYABLE, transport_error(exc))
             except requests.RequestException as exc:
-                result = TelegramSendResult(False, RETRYABLE, f"{type(exc).__name__}: {exc}")
+                return TelegramSendResult(False, UNKNOWN, transport_error(exc))
             else:
                 if resp.status_code == 200:
                     body = _telegram_body(resp)
@@ -311,7 +321,7 @@ class TelegramClient:
                         raw_id = body["result"].get("message_id")
                         message_id = int(raw_id) if isinstance(raw_id, int) else None
                     return TelegramSendResult(True, SENT, http_status=200, message_id=message_id)
-                result = _error_result(resp)
+                result = _error_result(resp, self.bot_token)
 
                 if result.outcome == NON_RETRYABLE and allow_plain_fallback:
                     description = result.error.lower()
@@ -322,6 +332,8 @@ class TelegramClient:
                             thread_id,
                             allow_plain_fallback=False,
                             use_html=False,
+                            deadline_at=deadline_at,
+                            clock=clock,
                         )
                         return TelegramSendResult(
                             fallback_result.success,
@@ -354,8 +366,12 @@ def _send_to_topic(
     thread_id: int | None = None,
     *,
     client: TelegramClient = _DEFAULT_CLIENT,
+    deadline_at: datetime | None = None,
+    clock: Callable[[], datetime] = utc_now,
 ) -> TelegramSendResult:
-    return client.send_message(message, thread_id)
+    if deadline_at is None:
+        return client.send_message(message, thread_id)
+    return client.send_message(message, thread_id, deadline_at=deadline_at, clock=clock)
 
 
 def send_job(
@@ -363,6 +379,8 @@ def send_job(
     target_topics: list[str] | None = None,
     *,
     client: TelegramClient = _DEFAULT_CLIENT,
+    deadline_at: datetime | None = None,
+    clock: Callable[[], datetime] = utc_now,
 ) -> dict[str, TelegramSendResult]:
     """Route and send a job, returning a structured result per attempted topic.
 
@@ -385,7 +403,10 @@ def send_job(
         if thread_id is None:
             result = TelegramSendResult(False, CONFIG_ERROR, f"Topic is not configured: {topic_key}")
         else:
-            result = _send_to_topic(message, thread_id, client=client)
+            if deadline_at is None:
+                result = _send_to_topic(message, thread_id, client=client)
+            else:
+                result = _send_to_topic(message, thread_id, client=client, deadline_at=deadline_at, clock=clock)
 
         results[topic_key] = result
 

@@ -52,7 +52,11 @@ def post_json(url: str, payload: dict = None, headers: dict = None,
 
 def get_text(url: str, params: dict = None, headers: dict = None,
              timeout: int = REQUEST_TIMEOUT) -> str | None:
-    """GET request returning raw text, or None on error."""
+    """Return response text (including an empty body), or None on HTTP/transport error.
+
+    Callers must keep None distinct from a successful empty response and validate
+    the source-specific response shape before recording collection success.
+    """
     try:
         resp = _session.get(url, params=params, headers=headers, timeout=timeout)
         resp.raise_for_status()

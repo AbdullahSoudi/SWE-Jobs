@@ -38,6 +38,49 @@ The current live deployment intentionally stays on **GitHub Actions + the `data`
 
 A recent manual production verification after the topic cleanup found fresh jobs and delivered them successfully across **Frontend**, **Other Tech**, **Backend**, and **Data & AI**, with no Telegram delivery failures. This confirms the routing/topic IDs are working; the remaining timing limitation is GitHub's scheduler, not the Telegram queue.
 
+### Delivery errors and snapshot recovery
+
+The production queue uses a live UTC delivery clock, separately from the cycle's
+collection timestamp. Each job's first-seen delivery deadline is checked before
+dispatch and again after limiter waits, retry backoff, and plain-text fallback.
+Expired work is stored as `expired` and is not retried. A request accepted before
+the deadline remains sent even if its successful response arrives later.
+Telegram cooldowns are measured from response receipt and rounded up to SQLite's
+stored second precision. Both the group pause and topic retry survive restarts.
+Tests can inject `delivery_clock` into `run_bot` or `clock` into
+`send_pending_jobs`; an explicitly supplied fixed `reference_time` remains a
+compatibility option for fixed-time tests. Custom two-argument sender adapters
+must enforce deadlines for any waits they perform internally; the production
+`send_job` path receives the clock and deadline automatically.
+
+Telegram transport diagnostics retain the exception class but omit raw exception
+text, which can contain the bot token in a request URL. HTTP error descriptions
+are also redacted before logging or persistence. This protects new diagnostics;
+it does not sanitize existing database history.
+
+Only a connection timeout is automatically retried among transport exceptions.
+Read timeouts, connection resets, truncated responses, and other uncertain
+transport failures become `UNKNOWN`, because the request may already have been
+accepted. They are not automatically replayed on the next run. This deliberately
+prefers a potentially missed notification over a duplicate when delivery cannot
+be established. Explicit HTTP response handling remains unchanged.
+
+Actions now requires an existing valid `data`-branch SQLite snapshot. Fetch,
+checkout, missing/empty database, integrity-check, or required-table failures
+stop restoration and prevent both bot execution and snapshot publication.
+`python -m ops.sqlite_snapshot restore` performs the checked shallow restore;
+`python -m ops.sqlite_snapshot verify` validates the local snapshot read-only.
+The save step validates again before publishing and never creates an orphan
+data branch as a fallback. An ordinary bot failure can still save valid partial
+progress after a successful restore.
+
+For an existing deployment, recover a trusted valid snapshot before resuming
+after restoration failure. A genuinely new deployment must explicitly provision
+its initial bot-schema snapshot on `data` through a separate operator bootstrap;
+a failed restore is never permission to initialize or replace production state.
+Local outbox durability still depends on successful final snapshot publication;
+these checks do not solve loss of an Actions runner after a Telegram send.
+
 ## Sources
 
 Enabled sources are assembled in `sources/__init__.py` as `ALL_FETCHERS`. Core feeds are static, while Saudi ATS company feeds are generated from `companies/saudi_ats.json`.
@@ -116,6 +159,12 @@ GitHub Actions is configured for a 15-minute schedule, but scheduled workflow ex
 
 A successful source schedules its next normal poll at its configured interval. A failed source retries on the next workflow run (nominally the next 15-minute cycle) even when its normal cadence is slower. Sources that are not due are skipped without blocking the Telegram delivery queue.
 
+LinkedIn (including Saudi V2) and Jobzaty return a sequence-compatible `CollectionResult` with jobs, attempted/succeeded/failed page counts and page failure reasons. A fully validated collection is `ok`; usable but incomplete collection is `partial`; total transport/schema failure is `failed`. Partial results retain usable jobs, but partial/failed runs do not establish a baseline or advance `last_success_at`, increment the failure streak and use the failure retry interval. Already-baselined sources may still deliver individually fresh jobs from successful partial pages; a source without a baseline remains no-send until its first complete collection. `last_nonempty_at` records usable observations even in a partial run.
+
+Transport failure (`None`) is distinct from a successful empty body. The LinkedIn guest endpoint permits an empty fragment or empty list; both adapters also recognize explicit no-results notices. Login/challenge pages, malformed required card fields and unrecognized HTML are failures, not quiet successful polls. This validation uses fixtures and a bounded set of recognized response shapes; it adds no provider requests or access-control bypass. Jobzaty remains discovery-only.
+
+Schema 11 adds nullable page counters to `source_runs` (`last_pages_*`) and `source_run_history` (`pages_*`). Existing history and adapters without page measurements retain `NULL`; existing baseline, delivery and last-success state is preserved. Legacy list-returning adapters remain supported, but a bare `None` return is a failure. Historical false-success/baseline records are not automatically rewritten.
+
 Health intentionally distinguishes a quiet ATS tenant from a broken integration:
 
 - `HEALTHY` — successful fetch with results.
@@ -136,7 +185,7 @@ The current V2 source is not in `PRODUCTION_SOURCE_KEYS`, so it can populate met
 
 `classifier.py` is the deterministic routing/filtering baseline. It supports English and Arabic tech titles, uses strong non-tech exclusions, and returns exactly one topic or `not tech`. A golden test set currently covers representative Backend, Frontend, Mobile, Data & AI, DevOps, QA, Cybersecurity, ERP, Internship, general-tech, Arabic, and non-tech cases. The dataset is intentionally small to start and should be expanded from real production misses/false positives.
 
-`locations.py` normalizes common Saudi Arabic/English city variants (for example Riyadh/الرياض, Jeddah/Jiddah/جدة, Khobar/الخبر, Dammam/الدمام, NEOM/نيوم). Location remains metadata, not a routing dimension. Messages can include city hashtags such as `#Riyadh` without creating extra Telegram topics.
+`locations.py` provides the shared country-aware interpretation for runtime filtering, ATS selection, deduplication, source analytics and Telegram market/eligibility labels. It normalizes common Saudi Arabic/English city variants, including Madinah/المدينة المنورة, Jeddah/Jiddah/جدة, Jazan/Jizan and Khobar/الخبر. Explicit country evidence wins over a city-only guess; conflicting countries remain unresolved. Without explicit country evidence, unknown qualifiers prevent a city-only inference (for example Medina, Ohio and Alexandria, Virginia). Thailand never matches Hail as a substring. Multi-city Saudi labels retain their country but cannot automatically merge with a single-city posting. Unknown locations are handled conservatively; this is a bounded alias resolver, not a global geocoder. Existing remote exceptions remain available. Location remains metadata, not a routing dimension, and messages can include city hashtags without creating extra Telegram topics. This change does not split historical clusters or rewrite production records.
 
 ## Saudi Eligibility Metadata
 
@@ -148,7 +197,7 @@ EXPLICITLY_OPEN
 NOT_SPECIFIED
 ```
 
-Examples of strong evidence include `Saudi nationals only`, `must be Saudi`, `للسعوديين فقط`, and Tamheer for `SAUDI_ONLY`; and `all nationalities`, `non-Saudis welcome`, `visa sponsorship is provided`, or `جميع الجنسيات` for `EXPLICITLY_OPEN`. Phrases such as `Saudi nationals preferred` do **not** become Saudi-only.
+Examples of strong applicant-specific evidence include `Saudi nationals only`, `must be Saudi`, `للسعوديين فقط`, `سعودي الجنسية` and Tamheer in a role/program label for `SAUDI_ONLY`; and `Applications are open to all nationalities`, `non-Saudis welcome`, `visa sponsorship is provided` or `الوظيفة متاحة لجميع الجنسيات` for `EXPLICITLY_OPEN`. Company workforce/customer demographics and Saudi-market experience do not establish applicant eligibility. Negation, conditional language and preferences do not create affirmative labels; conflicting affirmative restrictions/open statements return `NOT_SPECIFIED` with a conflict reason. Standard Arabic ة/ه spelling variants are recognized. These are conservative phrase rules, not a complete natural-language interpretation, and historical stored labels are not automatically rewritten.
 
 The matched evidence sentence and source key are stored in SQLite for audit, while Telegram stays compact. Saudi messages show one eligibility line and optional hashtags such as `#SaudiOnly` or `#OpenEligibility`; eligibility is metadata and never creates another Telegram topic. Full descriptions remain internal and are not posted to the group.
 
@@ -205,6 +254,7 @@ Current Telegram group layout:
 | `internships` | 🎓 **Internships** | `TOPIC_INTERNSHIPS` | Internships, trainee programs, and fresh/entry-level opportunities |
 | `backend` | ⚙️ **Backend** | `TOPIC_BACKEND` | Backend and full-stack roles |
 | `frontend` | 🎨 **Frontend** | `TOPIC_FRONTEND` | Frontend / web UI development |
+| `design` | 🎨 **UI/UX & Graphic Designer Jobs** | `TOPIC_DESIGN` | UI/UX, product/visual/graphic design and UX research |
 | `mobile` | 📱 **Mobile** | `TOPIC_MOBILE` | Android, iOS, Flutter, React Native |
 | `ai_ml` | 🤖 **Data & AI** | `TOPIC_AI_ML` | Data engineering, analytics, data science, AI/ML |
 | `devops` | ☁️ **DevOps** | `TOPIC_DEVOPS` | DevOps, cloud, infrastructure, SRE |
@@ -213,7 +263,9 @@ Current Telegram group layout:
 | `erp` | 🏢 **ERP / Business Apps** | `TOPIC_ERP` | ERP, SAP, Odoo, Salesforce, Dynamics, business applications |
 | `general` | 💻 **Other Tech** | `TOPIC_GENERAL` | Relevant tech roles that do not match a more specific category |
 
-Routing is deterministic. The first matching category wins, with **Internships** intentionally having the highest priority. Generic relevant tech titles such as `Software Engineer` fall back to `general` / **Other Tech**.
+Routing first requires technical evidence in the title or tags. Career-stage terms such as Intern, Junior, Graduate and their Arabic equivalents then select **Internships & Fresh**, preserving one topic per job. Stage terms and the generic word Developer cannot establish technical relevance alone. Matching uses complete normalized phrases, retaining Arabic, hyphens, .NET, C++ and C# without the Internal/intern or Arabic Java/JavaScript substring collisions. Otherwise the first matching technical category wins; generic relevant tech titles such as Software Engineer, Firmware Engineer and Database Engineer use **Other Tech**. Exact regression cases supplement aggregate corpus metrics.
+
+LinkedIn closure checks use complete visible status labels outside employer, title, and location fields. Workplace and employment tags similarly come from visible labels, not company names, links, hidden text, or HTML attributes. Remote evidence can also come from the title, location, or a remote-only query. Explicit On-site/Hybrid workplace evidence takes precedence over conflicting remote evidence and produces a warning. A missing location alone no longer implies Remote. These rules are covered by synthetic parser fixtures; they do not add provider requests.
 
 Country and source are metadata, not routing dimensions. `LinkedIn Fresh`, `Egypt`, and `Saudi` are no longer active topics. Country is represented in the card and with lightweight hashtags such as:
 
@@ -233,14 +285,15 @@ Linkedin Jobs
 Marketing Jobs
 Business & Product Jobs
 Jobs in SaudiArabia
-UI/UX & Graphic Design
 Data Engineering Jobs
 Application Support Jobs
 GameDev Jobs
 Blockchain Jobs
 ```
 
-`Data Engineering Jobs` is now part of **Data & AI**. Application-support/game/blockchain roles that still pass the tech classifier fall into the most appropriate active topic, usually **Other Tech**, Backend, or another role-specific category. Marketing/business/UI-UX roles do not get a dedicated topic anymore.
+`Data Engineering Jobs` is now part of **Data & AI**. Application-support/game/blockchain roles that still pass the tech classifier fall into the most appropriate active topic, usually **Other Tech**, Backend, or another role-specific category. Marketing/business roles do not get a dedicated topic.
+
+**UI/UX & Graphic Designer Jobs is active again in routing**, using the existing `TOPIC_DESIGN` secret/thread ID. Reuse the original topic rather than creating a replacement. Design roles are accepted by the runtime filter and select the design topic even when their tags include CSS; UI Developers still select Frontend. Design internships and Junior roles retain the existing Internships & Fresh priority. This reuses the existing discovery feeds without adding provider requests. A missing `TOPIC_DESIGN` reports CONFIG_ERROR rather than sending to another topic. Deployment requires the secret to contain the intended topic ID and the Telegram topic to be open; repository changes alone cannot verify either external setting. Previously delivered General/design jobs are not replayed, and historical skipped jobs are not automatically revived.
 
 If an existing Telegram topic is only **renamed**, keep its current GitHub secret/thread ID. Update the secret only when a topic is actually deleted and recreated with a new `message_thread_id`.
 
@@ -273,6 +326,7 @@ Active topic secrets:
 TOPIC_GENERAL
 TOPIC_BACKEND
 TOPIC_FRONTEND
+TOPIC_DESIGN
 TOPIC_MOBILE
 TOPIC_DEVOPS
 TOPIC_QA
@@ -435,7 +489,7 @@ save jobs.db to data branch
 
 ## Source Analytics (Shadow Evaluation)
 
-Schema v6 introduced source observations, v7 added persisted source scheduling/health state, v8 added posting-level identity plus conservative cross-source job clustering, v9 added internal description/eligibility evidence fields, and the current schema is v10 with an explicit `preferred_source_key` for canonical apply-link ownership.
+Schema v6 introduced source observations, v7 added persisted source scheduling/health state, v8 added posting-level identity plus conservative cross-source job clustering, v9 added internal description/eligibility evidence fields, v10 added an explicit `preferred_source_key` for canonical apply-link ownership, and current schema v11 adds nullable collection page counters.
 This lets the bot compare production LinkedIn with `linkedin_saudi_v2` without
 credit depending on which source happened to be processed first. No historical
 source-discovery order is fabricated; observation analytics starts when v6 is deployed.
@@ -449,9 +503,22 @@ Every run logs a compact Saudi 24-hour comparison for:
 - median lead time before another source sees the same job,
 - reliability and coverage gaps.
 
-`exclusive24h` is intentionally delayed: a first discovery is only scored after
-it has had a full 24 hours to appear on another source. This avoids declaring a
-source "exclusive" too early.
+`exclusive24h` is intentionally delayed. Activity counts and median lead still use
+discoveries in the current reporting period. Exclusivity uses first discoveries
+whose full 24-hour comparison window ended during that period: for a daily report,
+discoveries aged 24 hours through less than 48 hours. An observation from another
+source at or before the comparison deadline cancels exclusivity; one after it does
+not. Maturity uses an open start and closed end so adjacent daily cohorts do not
+double-count boundary discoveries. The logs and private digest label this separate
+matured cohort. Geography and observation-tracking guards apply to both cohorts.
+
+ATS adapter outage state is updated only when probes provide evidence. Skipped
+adapters and a lone failed/incomplete probe retain prior outage state without a
+recovery alert. Two or more failed tenants can establish a shared outage. A complete
+successful poll, including a valid empty result, disproves that shared outage and
+emits one recovery event; other failed tenants retain their individual health state.
+Repeated unchanged states do not repeat alerts. The run summary counts persisted
+active adapter outages, including those not probed in the current run.
 
 For an on-demand report:
 
@@ -537,6 +604,8 @@ No VPS cutover is active today. These steps are kept as a ready rollback-safe de
 
 If a cutover is intentionally chosen later, clone the repository to `/opt/swe-jobs/current`, then run `sudo bash deploy/install_systemd.sh`. The installer creates the `swejobs` system user, persistent directories, virtualenv, environment file, and systemd units. On a fresh host it also attempts a one-time import of the current `origin/data:jobs.db`, preserving the existing dedup/history state.
 
+The installer supports only the `swejobs` account and the layout above. Nondefault `APP_USER`, `APP_ROOT`, `APP_DIR`, `VENV_DIR`, `STATE_DIR`, `BACKUP_DIR`, or `CONFIG_DIR` values are rejected before any system changes, because the shipped service units and environment template use fixed paths. Unset or empty variables use the defaults; explicitly supplying the defaults is also accepted. Run `bash tests/test_install_systemd.sh` to check this configuration contract without installing anything.
+
 Before cutover, fill `/etc/swe-jobs/swe-jobs.env` with the same Telegram token/group/topic IDs used by GitHub. Set `VPS_PRODUCTION=true` in GitHub immediately before the first non-seed VPS run so scheduled Actions stop first. Test with `systemctl start swe-jobs.service` and inspect `journalctl -u swe-jobs.service`. If it fails, set `VPS_PRODUCTION=false` to roll back to GitHub. If it succeeds, enable `swe-jobs.timer` and `swe-jobs-backup.timer`.
 
 The deployment templates intentionally do not contain real secrets. Until that explicit cutover happens, GitHub Actions remains the single production owner.
@@ -559,6 +628,14 @@ Run tests:
 
 ```powershell
 python -m unittest discover -s tests -v
+```
+
+The `Offline regression tests` workflow runs the complete suite on Ubuntu with Python 3.11, including the Linux process-lock tests, and checks the standby installer's configuration contract. It runs on pull requests and pushes to `main` with read-only repository permissions and no production secrets. The Python runner clears inherited application settings, uses temporary databases, and blocks network/subprocess operations during tests. To run the same checks on Linux:
+
+```bash
+python -B ops/run_tests.py
+bash -n deploy/install_systemd.sh
+bash tests/test_install_systemd.sh
 ```
 
 Run locally from PowerShell:

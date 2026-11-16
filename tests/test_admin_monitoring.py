@@ -47,7 +47,8 @@ class AdminMonitoringTests(unittest.TestCase):
                 self.assertEqual(len(first), 1)
                 self.assertIn("greenhouse", first[0])
                 self.assertEqual(sync_adapter_outage_events(conn, ["greenhouse"]), [])
-                recovered = sync_adapter_outage_events(conn, [])
+                self.assertEqual(sync_adapter_outage_events(conn, []), [])
+                recovered = sync_adapter_outage_events(conn, [], evaluated_adapters=["greenhouse"])
                 self.assertEqual(len(recovered), 1)
                 self.assertIn("recovered", recovered[0])
 

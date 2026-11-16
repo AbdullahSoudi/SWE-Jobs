@@ -32,6 +32,8 @@ class SourceAnalytics:
     mature_first_discoveries: int = 0
     exclusive_24h: int = 0
     median_lead_minutes: float | None = None
+    report_hours: int = 24
+    exclusive_window_hours: int = 24
 
     @property
     def success_rate(self) -> float:
@@ -94,21 +96,26 @@ def build_source_analytics(
     Run metrics come from ``source_run_history``. Discovery metrics use
     ``source_observations`` and only consider jobs whose global first_seen_at is
     inside the observation-tracking period. ``exclusive_24h`` is only scored
-    once a first discovery has had a full 24-hour opportunity to appear on
-    another source.
+    for first discoveries whose comparison window matured during the reporting
+    period (window_start, now]. Activity totals still use the current period.
     """
     now = ensure_utc(reference_time or datetime.now(UTC))
     requested = tuple(dict.fromkeys(str(s) for s in sources))
     if not requested:
         return []
 
-    window_start = now - timedelta(hours=max(1, int(hours)))
+    report_hours = max(1, int(hours))
+    exclusive_hours = max(1, int(exclusive_window_hours))
+    exclusive_duration = timedelta(hours=exclusive_hours)
+    window_start = now - timedelta(hours=report_hours)
     tracking_start = _analytics_start(conn)
     discovery_start = max(window_start, tracking_start) if tracking_start else window_start
     window_start_iso = iso_utc(window_start)
-    discovery_start_iso = iso_utc(discovery_start)
+    mature_start = window_start - exclusive_duration
+    observation_start = max(mature_start, tracking_start) if tracking_start else mature_start
+    observation_start_iso = iso_utc(observation_start)
     now_iso = iso_utc(now)
-    mature_cutoff = now - timedelta(hours=max(1, int(exclusive_window_hours)))
+    mature_cutoff = now - exclusive_duration
 
     results: list[SourceAnalytics] = []
     for source in requested:
@@ -142,7 +149,7 @@ def build_source_analytics(
               )
             ORDER BY o.first_seen_at
             """,
-            (source, discovery_start_iso, now_iso),
+            (source, observation_start_iso, now_iso),
         ).fetchall()
 
         discoveries = 0
@@ -154,23 +161,26 @@ def build_source_analytics(
         for obs in observation_rows:
             if not _job_is_in_scope(str(obs["location"] or ""), saudi_only=saudi_only):
                 continue
-            discoveries += 1
             source_seen = _parse_iso(str(obs["first_seen_at"]))
+            in_activity_window = source_seen >= discovery_start
+            if in_activity_window:
+                discoveries += 1
             all_obs = conn.execute(
                 """
                 SELECT source, first_seen_at
                 FROM source_observations
-                WHERE job_id = ?
+                WHERE job_id = ? AND first_seen_at <= ?
                 ORDER BY first_seen_at, source
                 """,
-                (int(obs["job_id"]),),
+                (int(obs["job_id"]), now_iso),
             ).fetchall()
             if not all_obs:
                 continue
             earliest = min(_parse_iso(str(row["first_seen_at"])) for row in all_obs)
             if source_seen != earliest:
                 continue
-            first_discoveries += 1
+            if in_activity_window:
+                first_discoveries += 1
 
             later_other_times = sorted(
                 _parse_iso(str(row["first_seen_at"]))
@@ -178,14 +188,14 @@ def build_source_analytics(
                 if str(row["source"]) != source
                 and _parse_iso(str(row["first_seen_at"])) >= source_seen
             )
-            if later_other_times:
+            if in_activity_window and later_other_times:
                 lead_minutes.append(
                     max(0.0, (later_other_times[0] - source_seen).total_seconds() / 60.0)
                 )
 
-            if source_seen <= mature_cutoff:
+            if mature_start < source_seen <= mature_cutoff:
                 mature_first += 1
-                exclusive_deadline = source_seen + timedelta(hours=exclusive_window_hours)
+                exclusive_deadline = source_seen + exclusive_duration
                 matched_within_window = any(t <= exclusive_deadline for t in later_other_times)
                 if not matched_within_window:
                     exclusive += 1
@@ -205,6 +215,8 @@ def build_source_analytics(
                 mature_first_discoveries=mature_first,
                 exclusive_24h=exclusive,
                 median_lead_minutes=(median(lead_minutes) if lead_minutes else None),
+                report_hours=report_hours,
+                exclusive_window_hours=exclusive_hours,
             )
         )
     return results
@@ -222,7 +234,8 @@ def format_source_analytics(
             f"raw={row.raw_count}, relevant={row.relevant_count} ({row.relevant_rate:.0%}), "
             f"fresh={row.fresh_count}, discoveries={row.discoveries}, "
             f"first={row.first_discoveries} ({row.first_discovery_rate:.0%}), "
-            f"exclusive24h={row.exclusive_24h}/{row.mature_first_discoveries}, "
+            f"exclusive{row.exclusive_window_hours}h={row.exclusive_24h}/{row.mature_first_discoveries} "
+            f"(matured_in_last={row.report_hours}h), "
             f"median_lead={lead}, gaps={row.coverage_gaps}"
         )
     return output

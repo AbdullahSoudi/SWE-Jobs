@@ -37,10 +37,12 @@ try:
 except ModuleNotFoundError:  # local flat-file test layout
     from __init__ import ALL_FETCHERS, SOURCE_POLL_INTERVAL_MINUTES
 from models import Job, is_programming_job, passes_geo_filter
+from sources.collection import CollectionResult
 from classifier import is_tech_job
 from eligibility import enrich_job_eligibility
 from telegram_sender import (
     CONFIG_ERROR,
+    EXPIRED,
     RATE_LIMITED,
     RETRYABLE,
     SENT,
@@ -61,6 +63,7 @@ from freshness import (
 )
 from source_analytics import build_source_analytics, format_source_analytics
 from admin_monitoring import (
+    ADMIN_ACTIVE_ADAPTER_OUTAGES_KEY,
     build_daily_digest,
     digest_due,
     format_event_batch,
@@ -74,6 +77,7 @@ from source_runtime import (
     classify_source_health,
     compute_next_poll_at,
     detect_ats_adapter_outages,
+    evaluated_ats_adapters,
     is_source_due,
     normalize_poll_interval,
 )
@@ -97,6 +101,7 @@ from db import (
     mark_source_baselined,
     mark_topic_sending,
     record_delivery_result,
+    retry_timestamp,
     record_source_observation,
     record_source_run_history,
     recover_stale_sending_deliveries,
@@ -116,7 +121,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
-Fetcher = tuple[str, Callable[[], list[Job]]]
+Fetcher = tuple[str, Callable[[], list[Job] | CollectionResult]]
 Sender = Callable[[Job, list[str] | None], dict[str, object]]
 Router = Callable[[Job], list[str]]
 Cleanup = Callable[[], None]
@@ -151,6 +156,9 @@ class SourceCycleMetrics:
     shadow_mode: bool = True
     health_status: str = "UNKNOWN"
     poll_interval_minutes: int = 15
+    pages_attempted: int | None = None
+    pages_succeeded: int | None = None
+    pages_failed: int | None = None
 
 
 @dataclass
@@ -244,7 +252,19 @@ def fetch_all_jobs(
         started = time.perf_counter()
         try:
             log.info("Fetching from %s...", display_name)
-            jobs = fetcher() or []
+            collection = fetcher()
+            if isinstance(collection, CollectionResult):
+                jobs = collection.jobs
+                metrics.status = collection.status
+                metrics.error = collection.error
+                metrics.pages_attempted = collection.pages_attempted
+                metrics.pages_succeeded = collection.pages_succeeded
+                metrics.pages_failed = collection.pages_failed
+            elif collection is None:
+                raise ValueError("source returned no collection result")
+            else:
+                jobs = collection
+                metrics.status = "ok"
             for job in jobs:
                 if not _source_key(job.source):
                     job.source = source_key
@@ -255,8 +275,9 @@ def fetch_all_jobs(
                         job.source,
                     )
             all_jobs.extend(jobs)
-            metrics.status = "ok"
             metrics.raw_jobs = len(jobs)
+            if metrics.status != "ok":
+                log.warning("  %s: status=%s; %s", display_name, metrics.status, metrics.error)
             log.info("  %s: %s raw jobs", display_name, len(jobs))
         except Exception as exc:  # keep one failed source from killing the run
             metrics.status = "failed"
@@ -520,6 +541,8 @@ def _aggregate_delivery_status(target_topics: list[str], states: dict[str, dict]
     statuses = [str((states.get(topic) or {}).get("status") or "queued") for topic in target_topics]
     if all(status == "sent" for status in statuses):
         return "sent"
+    if all(status == "expired" for status in statuses):
+        return "expired"
 
     has_sent = any(status == "sent" for status in statuses)
     has_retryable = any(status in {"queued", "retry_wait", "sending"} for status in statuses)
@@ -539,6 +562,7 @@ def send_pending_jobs(
     router: Router = route_job,
     *,
     reference_time: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[int, int, int, int]:
     """Deliver queued jobs with durable per-topic state and Telegram backpressure."""
     pending_jobs = get_jobs_for_sending(conn, limit=limit)
@@ -546,7 +570,10 @@ def send_pending_jobs(
     successes = 0
     failures = 0
     skipped = 0
-    now = ensure_utc(reference_time or utc_now())
+    # Explicit fixed reference_time remains a test compatibility option. Real
+    # runs use a live clock; advancing-clock tests take precedence over it.
+    delivery_clock = clock or (utc_now if reference_time is None else lambda: reference_time)
+    now = ensure_utc(delivery_clock())
     blocked_until = get_metadata(conn, TELEGRAM_BLOCKED_UNTIL_KEY)
     if blocked_until:
         try:
@@ -563,6 +590,7 @@ def send_pending_jobs(
     disabled_topics: set[str] = set()
 
     for stored in pending_jobs:
+        now = ensure_utc(delivery_clock())
         job = stored.to_job()
         target_topics = router(job)
 
@@ -600,6 +628,21 @@ def send_pending_jobs(
         conn.commit()  # durable outbox before any network call
 
         states = get_topic_delivery_states(conn, stored.id)
+        # Expire before readiness checks as a deferred retry can also age out.
+        now = ensure_utc(delivery_clock())
+        if now >= _parse_iso(deadline_at):
+            conn.execute(
+                "UPDATE job_sends SET status='expired', next_attempt_at=NULL, updated_at=? "
+                "WHERE job_id=? AND status IN ('queued', 'retry_wait', 'sending')",
+                (iso_utc(now), stored.id),
+            )
+            states = get_topic_delivery_states(conn, stored.id)
+            set_job_send_status(conn, stored.id, _aggregate_delivery_status(target_topics, states))
+            set_job_freshness_state(conn, stored.id, "TOO_OLD", "send_queue_deadline_exceeded")
+            conn.commit()
+            processed += 1
+            skipped += 1
+            continue
         topics_to_send = [
             topic
             for topic in target_topics
@@ -615,14 +658,23 @@ def send_pending_jobs(
             continue
 
         for topic_key in topics_to_send:
+            now = ensure_utc(delivery_clock())
             # Claim + commit before send. If the process dies after Telegram accepted
             # the message, the next run recovers this as UNKNOWN rather than blindly
             # retrying and potentially duplicating it.
             mark_topic_sending(conn, stored.id, topic_key, reference_time=now)
             conn.commit()
 
-            raw_results = sender(job, [topic_key]) or {}
+            if now >= _parse_iso(deadline_at):
+                raw_results = {topic_key: TelegramSendResult(False, EXPIRED, "send_queue_deadline_exceeded")}
+            elif sender is send_job:
+                raw_results = sender(job, [topic_key], deadline_at=_parse_iso(deadline_at), clock=delivery_clock) or {}
+            else:
+                # Legacy injected senders retain their two-argument contract.
+                # Adapters with internal waits must enforce their own deadline.
+                raw_results = sender(job, [topic_key]) or {}
             result = _coerce_send_result(raw_results.get(topic_key, False))
+            received_at = ensure_utc(delivery_clock())
             record_delivery_result(
                 conn,
                 stored.id,
@@ -634,7 +686,7 @@ def send_pending_jobs(
                 retry_after_s=result.retry_after_s,
                 telegram_message_id=result.message_id,
                 fallback_used=result.fallback_used,
-                reference_time=now,
+                reference_time=received_at,
             )
             conn.commit()
 
@@ -650,7 +702,7 @@ def send_pending_jobs(
             if result.outcome == RATE_LIMITED:
                 queue_rate_limited = True
                 retry_after = max(1, int(result.retry_after_s or 60))
-                blocked_until = iso_utc(now + timedelta(seconds=retry_after))
+                blocked_until = retry_timestamp(received_at, retry_after)
                 set_metadata(conn, TELEGRAM_BLOCKED_UNTIL_KEY, blocked_until)
                 conn.commit()
                 log.warning(
@@ -662,6 +714,8 @@ def send_pending_jobs(
         states = get_topic_delivery_states(conn, stored.id)
         status = _aggregate_delivery_status(target_topics, states)
         set_job_send_status(conn, stored.id, status)
+        if status == "expired":
+            set_job_freshness_state(conn, stored.id, "TOO_OLD", "send_queue_deadline_exceeded")
         conn.commit()
         processed += 1
         log.info("%s: delivery status=%s", job.title, status)
@@ -693,6 +747,7 @@ def run_bot(
     reference_time: datetime | None = None,
     production_source_keys: set[str] | None = None,
     source_poll_intervals: dict[str, int] | None = None,
+    delivery_clock: Callable[[], datetime] | None = None,
 ) -> RunSummary:
     """Run one bot cycle. Parameters are injectable for tests."""
     start = time.time()
@@ -833,6 +888,9 @@ def run_bot(
                 poll_interval_minutes=metrics.poll_interval_minutes,
                 next_poll_at=next_poll_at,
                 health_status=metrics.health_status,
+                pages_attempted=metrics.pages_attempted,
+                pages_succeeded=metrics.pages_succeeded,
+                pages_failed=metrics.pages_failed,
             )
             record_source_run_history(
                 conn,
@@ -853,6 +911,9 @@ def run_bot(
                 coverage_gap=metrics.coverage_gap,
                 shadow_mode=metrics.shadow_mode,
                 health_status=metrics.health_status,
+                pages_attempted=metrics.pages_attempted,
+                pages_succeeded=metrics.pages_succeeded,
+                pages_failed=metrics.pages_failed,
             )
             summary.source_runs_recorded += 1
 
@@ -880,13 +941,16 @@ def run_bot(
             if metrics.coverage_gap:
                 log.warning("Source %s has a freshness coverage gap.", source_key)
 
-        adapter_outages = detect_ats_adapter_outages(
-            {key: metrics.status for key, metrics in source_metrics.items()}
-        )
-        summary.ats_adapter_outages = len(adapter_outages)
+        source_statuses = {key: metrics.status for key, metrics in source_metrics.items()}
+        adapter_outages = detect_ats_adapter_outages(source_statuses)
         for adapter in adapter_outages:
             log.error("ATS adapter-level outage suspected: %s tenants all failed this run.", adapter)
-        admin_events.extend(sync_adapter_outage_events(conn, adapter_outages))
+        admin_events.extend(sync_adapter_outage_events(
+            conn, adapter_outages, evaluated_adapters=evaluated_ats_adapters(source_statuses)
+        ))
+        summary.ats_adapter_outages = len([
+            value for value in (get_metadata(conn, ADMIN_ACTIVE_ADAPTER_OUTAGES_KEY) or "").split(",") if value
+        ])
 
         conn.commit()
 
@@ -913,7 +977,8 @@ def run_bot(
                 limit=max_jobs_per_run,
                 sender=sender,
                 router=router,
-                reference_time=run_reference,
+                reference_time=reference_time,
+                clock=delivery_clock,
             )
             summary.pending_processed = processed
             summary.topic_send_successes = successes

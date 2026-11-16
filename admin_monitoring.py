@@ -70,11 +70,18 @@ def sync_coverage_gap_event(conn, source: str, active: bool) -> str | None:
     return f"✅ {source}: freshness coverage restored"
 
 
-def sync_adapter_outage_events(conn, active_outages: Iterable[str]) -> list[str]:
-    """Return only new/recovered ATS adapter outage events."""
-    current = {str(value).strip().lower() for value in active_outages if str(value).strip()}
+def sync_adapter_outage_events(
+    conn, active_outages: Iterable[str], *, evaluated_adapters: Iterable[str] = ()
+) -> list[str]:
+    """Update only adapters with a qualifying observed assessment this cycle.
+
+    Omitted/skipped adapters and isolated failed probes cannot establish recovery.
+    """
+    observed = {str(value).strip().lower() for value in active_outages if str(value).strip()}
+    evaluated = {str(value).strip().lower() for value in evaluated_adapters if str(value).strip()} | observed
     previous_raw = get_metadata(conn, ADMIN_ACTIVE_ADAPTER_OUTAGES_KEY) or ""
     previous = {value for value in previous_raw.split(",") if value}
+    current = (previous - evaluated) | observed
 
     events: list[str] = []
     for adapter in sorted(current - previous):
@@ -203,7 +210,7 @@ def build_daily_digest(conn, *, reference_time: datetime) -> str:
     ]
 
     if analytics:
-        lines.extend(["", "Saudi discovery:"])
+        lines.extend(["", "Saudi discovery: activity in the last 24h; exclusivity matured in the last 24h"])
         for row in analytics:
             lead = "n/a" if row.median_lead_minutes is None else f"{row.median_lead_minutes:.0f}m"
             lines.append(

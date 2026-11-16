@@ -132,3 +132,18 @@ def detect_ats_adapter_outages(source_statuses: Mapping[str, str]) -> list[str]:
         if len(statuses) >= 2 and all(status != "ok" for status in statuses):
             outages.append(platform)
     return outages
+
+
+def evaluated_ats_adapters(source_statuses: Mapping[str, str]) -> set[str]:
+    """Adapters with either a multi-tenant outage or an observed complete success.
+
+    One successful poll (including a valid empty poll) disproves a shared outage;
+    remaining failed tenants keep their own health state. One failed/incomplete
+    probe alone provides no platform recovery evidence.
+    """
+    evaluated = set(detect_ats_adapter_outages(source_statuses))
+    for source, status in source_statuses.items():
+        parts = (source or "").split("_")
+        if len(parts) >= 3 and parts[0] == "ats" and (status or "").lower() == "ok":
+            evaluated.add(parts[1])
+    return evaluated

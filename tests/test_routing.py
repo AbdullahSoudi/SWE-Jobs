@@ -17,6 +17,7 @@ class TelegramRoutingTests(unittest.TestCase):
                 "general",
                 "backend",
                 "frontend",
+                "design",
                 "mobile",
                 "devops",
                 "qa",

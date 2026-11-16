@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from freshness import parse_iso_publication, parse_relative_publication
-from locations import normalize_saudi_location
+from locations import normalize_location, normalize_saudi_location
 from models import Job
 from eligibility import html_to_text
 
@@ -42,15 +42,12 @@ def _saudi_location(location: str, country: str = "") -> str | None:
     """Return an explicitly Saudi location string, or None for non-Saudi rows."""
     loc = _clean(location)
     country_text = _clean(country)
-    combined = _join_nonempty((loc, country_text))
-    if normalize_saudi_location(combined).is_saudi:
+    if normalize_location(loc, country=country_text).country_code == "SA":
         if loc and normalize_saudi_location(loc).is_saudi:
             return loc
         if loc:
             return f"{loc}, Saudi Arabia"
         return "Saudi Arabia"
-    if country_text.upper() == "SA":
-        return f"{loc}, Saudi Arabia" if loc else "Saudi Arabia"
     return None
 
 
@@ -198,10 +195,13 @@ def fetch_lever_company(
         # is ambiguous; applying one country code to every multi-location label
         # can misclassify a non-Saudi secondary office.
         location = next(
-            (matched for candidate in location_candidates if (matched := _saudi_location(candidate))),
+            (matched for candidate in location_candidates
+             if (candidate != location_candidates[0] or not country_hint
+                 or normalize_location(candidate, country=country_hint).country_code == "SA")
+             if (matched := _saudi_location(candidate))),
             None,
         )
-        if not location and location_candidates:
+        if not location:
             location = _saudi_location(location_candidates[0], country_hint)
         if not location:
             continue
